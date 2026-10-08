@@ -1,0 +1,95 @@
+{
+  "grubby kernel cmdline": [
+    "kb-0005",
+    "kb-0004"
+  ],
+  "zellij COPR": [
+    "kb-0010",
+    "kb-0002",
+    "kb-0086"
+  ],
+  "clamshell thermal baseline": [
+    "kb-0006"
+  ],
+  "consoleblank": [
+    "kb-0004",
+    "kb-0005",
+    "kb-0003"
+  ],
+  "tty_tickets": [
+    "kb-0013"
+  ],
+  "bin/kb": [
+    "kb-0012",
+    "kb-0002",
+    "kb-0056",
+    "kb-0042"
+  ],
+  "e2e-data-ai-project": [
+    "kb-0007",
+    "kb-0048",
+    "kb-0049",
+    "kb-0078",
+    "kb-0076",
+    "kb-0060"
+  ],
+  "FTS5 bm25 index": [
+    "kb-0011",
+    "kb-0038",
+    "kb-0001"
+  ],
+  "ai-box.vn proxy model routing": [
+    "kb-0070",
+    "kb-0020",
+    "kb-0018",
+    "kb-0017",
+    "kb-0067"
+  ],
+  "docker group root equivalent chroot": [
+    "kb-0013"
+  ],
+  "how to stop laptop sleeping when lid closed": [
+    "kb-0006",
+    "kb-0003",
+    "kb-0038",
+    "kb-0004",
+    "kb-0046",
+    "kb-0079"
+  ],
+  "yum package install policy": [
+    "kb-0015",
+    "kb-0002",
+    "kb-0057",
+    "kb-0012",
+    "kb-0058",
+    "kb-0006"
+  ],
+  "zellij freeze herdr": [
+    "kb-0077"
+  ],
+  "distill proposal promotion": [
+    "kb-0064",
+    "kb-0038",
+    "kb-0026",
+    "kb-0086",
+    "kb-0085",
+    "kb-0045"
+  ],
+  "settings.json": [
+    "kb-0035",
+    "kb-0044",
+    "kb-0041",
+    "kb-0042",
+    "kb-0072",
+    "kb-0018"
+  ],
+  "kb-0042": [
+    "kb-0042"
+  ],
+  "consoleblankk": [
+    "kb-0004",
+    "kb-0005",
+    "kb-0003"
+  ],
+  "zzq-nonexistent-token qwxvb": []
+}
