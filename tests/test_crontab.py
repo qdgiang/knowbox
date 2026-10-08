@@ -32,9 +32,6 @@ def test_all_crontab_percents_escaped():
     assert not bad, f"bare % in crontab command field(s): {bad}"
 
 
-@pytest.mark.skip(reason="kb-0142 Phase B4 gate — flips green when the "
-                         "crontab points at dotfiles/scripts/kb-janitor.sh "
-                         "and ~/.local/bin/knowbox")
 def test_crontab_knowbox_paths_canary():
     # kb-0142 split canary: the janitor line must run the DOTFILES script with
     # the knowbox binary; nothing may still point at ~/kb/bin (the data repo

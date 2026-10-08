@@ -87,17 +87,11 @@ def test_skill_teaches_conflicts_judge_pass():
         "SKILL.md lost the conflicts judge-pass procedure (P12/D5)"
 
 
-@pytest.mark.skip(reason="kb-0142 Phase B5 gate — flips green when the "
-                         "dotfiles rename pass lands knowbox wording in "
-                         "AGENTS.md")
 def test_agents_md_names_cli_supersede():
     assert "knowbox supersede OLD --with NEW" in AGENTS.read_text(), \
         "AGENTS.md write-protocol line doesn't name the CLI command (P11)"
 
 
-@pytest.mark.skip(reason="kb-0142 Phase B5 gate — flips green when the "
-                         "dotfiles rename pass lands knowbox wording in "
-                         "SKILL.md/AGENTS.md")
 def test_no_bare_kb_invocations_remain():
     # kb-0142 rename canary: bare `kb <cmd>` = the retired command name
     found = {}
