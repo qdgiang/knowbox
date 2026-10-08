@@ -88,3 +88,6 @@ against it forever.
 (`uv tool update-shell` puts it on PATH). Locking uses `msvcrt`, files are
 written LF, stdio is UTF-8. Keep the KB on a local disk — never OneDrive
 (SQLite locking). The janitor heartbeat is auto-exempt on NT.
+
+Full setup walkthrough (Git, uv, install, `knowbox init`, fresh-KB rules,
+optional backup remote/embed/harness files): [docs/windows-runbook.md](docs/windows-runbook.md).
