@@ -67,7 +67,8 @@ AGENTS = Path.home() / "AGENTS.md"
 
 def _bare_kb_invocations(text):
     """`kb <word>` tokens that invoke the retired CLI — note ids (kb-NNNN),
-    repo paths (~/kb, kb/), and frontmatter values never match."""
+    repo paths (kb/), and frontmatter values never match. The old data-dir
+    path `~/kb` must also be gone (renamed to ~/knowbox 2026-10-09)."""
     import re
     cmds = ("search|expand|show|list|new|recent|touch|verify|supersede|embed|"
             "vsearch|reindex|lint|stale|churn|refs|conflicts|next-id|init")
@@ -101,3 +102,14 @@ def test_no_bare_kb_invocations_remain():
             if hits:
                 found[name] = hits
     assert not found, f"bare `kb` invocations survived the rename: {found}"
+
+
+def test_no_old_data_dir_path_remains():
+    # 2026-10-09 rename canary: the old data dir ~/kb must be gone from the
+    # live protocol docs (renamed to ~/knowbox)
+    found = {}
+    for name, path in (("SKILL.md", SKILL), ("AGENTS.md", AGENTS)):
+        if path.exists():
+            if "~/kb" in path.read_text():
+                found[name] = "~/kb"
+    assert not found, f"old data-dir path ~/kb survived the rename: {found}"

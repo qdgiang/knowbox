@@ -1,9 +1,9 @@
 # Windows runbook — knowbox CLI + a fresh, notes-only KB
 
 Goal: the knowbox CLI on a Windows machine with its **own fresh empty KB**.
-The server KB (`qdgiang/kb`, private notes) **never lands on this machine** —
-that separation is the whole reason this repo exists (server-side note
-kb-0144). Everything below is PowerShell unless noted.
+The server KB (`qdgiang/knowbox-server-data`, private notes) **never lands on
+this machine** — that separation is the whole reason this repo exists
+(server-side note kb-0144). Everything below is PowerShell unless noted.
 
 ## 1. Git
 
@@ -42,12 +42,12 @@ uv tool install --reinstall git+https://github.com/qdgiang/knowbox
 ## 4. Create the fresh KB
 
 ```powershell
-knowbox init                 # skeleton at %USERPROFILE%\kb
+knowbox init                 # skeleton at %USERPROFILE%\knowbox
 ```
 
 - Local disk only, **never OneDrive** (SQLite locking breaks).
-- Custom location: `knowbox init D:\kb` then
-  `setx KNOWBOX_ROOT D:\kb` (new terminal).
+- Custom location: `knowbox init D:\knowbox` then
+  `setx KNOWBOX_ROOT D:\knowbox` (new terminal).
 - `init` creates `notes/ refs/ raw/`, a SCHEMA stub, LF-pinned
   `.gitattributes`, a git repo with repo-local identity, no remote.
 
@@ -58,22 +58,22 @@ knowbox lint                 # 0 errors (NT: never-present heartbeat auto-exempt
 knowbox new --type fact --domain windows --title "first note" --no-edit --body "…"
 knowbox search first
 knowbox reindex              # "no changes"
-git -C $HOME\kb log --oneline  # init + first-note commits, LOCAL ONLY
+git -C $HOME\knowbox log --oneline  # init + first-note commits, LOCAL ONLY
 ```
 
 ## 6. Optional: private backup remote
 
-Point `origin` at a SEPARATE private repo (e.g. `qdgiang/kb-windows`) —
+Point `origin` at a SEPARATE private repo (e.g. `qdgiang/knowbox-windows`) —
 this activates the CLI's auto-push:
 
 ```powershell
-gh repo create qdgiang/kb-windows --private
-git -C $HOME\kb remote add origin https://github.com/qdgiang/kb-windows.git
-git -C $HOME\kb push -u origin main
+gh repo create qdgiang/knowbox-windows --private
+git -C $HOME\knowbox remote add origin https://github.com/qdgiang/knowbox-windows.git
+git -C $HOME\knowbox push -u origin main
 ```
 
-**NEVER add `qdgiang/kb` as a remote** — not even read-only. The server notes
-must not be fetchable from this machine.
+**NEVER add `qdgiang/knowbox-server-data` as a remote** — not even read-only.
+The server notes must not be fetchable from this machine.
 
 ## 7. Optional: semantic search (embed/vsearch/fusion)
 

@@ -290,7 +290,7 @@ def test_expansion_makes_zero_http_calls(tmp_path):
             "notes": {"kb-9001": {"h": "fixture",
                                   "v": _vec("grubby kernel cmdline")}}}),
             encoding="utf-8")
-        env = {"KB_EMBED_URL": f"http://127.0.0.1:{srv.server_port}/embeddings"}
+        env = {"KNOWBOX_EMBED_URL": f"http://127.0.0.1:{srv.server_port}/embeddings"}
         # exact-path search (fusion gated off) + expand: graph must not call
         r = kb_run("search", "grubby", "kernel", "cmdline", "--expand",
                    root=root, env_extra=env, expect_rc=0)

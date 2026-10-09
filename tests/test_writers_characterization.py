@@ -35,8 +35,8 @@ def test_writer_lifecycle_new_touch_verify_supersede_reindex(tmp_path):
     assert f"created: {TODAY}" in fm
     assert "kb-9013" in (root / "index.md").read_text()
     assert "create | kb-9013" in (root / "log.md").read_text()
-    assert "kb: create" in git_run(root, "log", "--oneline", "-1")
-    assert "kb: create" in git_dir_run(bare, "log", "--oneline", "-1"), \
+    assert "knowbox: create" in git_run(root, "log", "--oneline", "-1")
+    assert "knowbox: create" in git_dir_run(bare, "log", "--oneline", "-1"), \
         "git_commit did not push to the fake remote"
 
     # --- touch: bumps updated: only

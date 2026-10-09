@@ -28,11 +28,11 @@ from pathlib import Path
 import pytest
 
 REPO = Path(__file__).resolve().parent.parent          # knowbox repo root
-PROD_KB = Path("/home/giang/kb").resolve()
+PROD_KB = Path("/home/giang/knowbox").resolve()
 CORPUS_V1 = REPO / "tests" / "fixtures" / "corpus-v1"
 GOLDENS = REPO / "tests" / "goldens"
 CLI_SRC = REPO / "src" / "knowbox" / "cli.py"          # the version under test
-DOTFILES_JANITOR = Path("/home/giang/dotfiles/scripts/kb-janitor.sh")
+DOTFILES_JANITOR = Path("/home/giang/dotfiles/scripts/knowbox-janitor.sh")
 UV = shutil.which("uv") or "/home/giang/.local/bin/uv"
 REGEN = os.environ.get("KB_GOLDENS_REGENERATE") == "1"
 
@@ -52,8 +52,8 @@ def _cli_env(root):
            "KNOWBOX_ROOT": str(root),
            "ANTHROPIC_AUTH_TOKEN": "test-token",     # short-circuits settings.json read
            "KNOWBOX_EMBED_URL": "http://127.0.0.1:9/embeddings"}  # blackhole
-    env.pop("KB_ROOT", None)       # deprecated fallbacks never leak in
-    env.pop("KB_EMBED_URL", None)
+    env.pop("KB_ROOT", None)       # removed at 2.0 — must never leak in
+    env.pop("KB_EMBED_URL", None)  # legacy spelling — dropped at 2.0
     return env
 
 

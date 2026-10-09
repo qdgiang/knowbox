@@ -1,6 +1,6 @@
 """Janitor e2e + lint heartbeat checks (hardening plan P2; knowbox split kb-0142).
 
-The janitor (~/dotfiles/scripts/kb-janitor.sh since the split) is tested
+The janitor (~/dotfiles/scripts/knowbox-janitor.sh, renamed 2026-10-09) is tested
 end-to-end against a mini sandbox: real bash, the CLI under test via a
 knowbox_shim as KNOWBOX_BIN, a TG_BIN shim that records alert calls to a
 file. No network, no Telegram, no cron.
@@ -15,7 +15,7 @@ from conftest import DOTFILES_JANITOR, build_sandbox, kb_run, knowbox_shim
 
 JANITOR = DOTFILES_JANITOR
 _SKIP = pytest.mark.skipif(not JANITOR.exists(),
-                           reason="kb-janitor.sh not present")
+                           reason="knowbox-janitor.sh not present")
 
 
 @_SKIP

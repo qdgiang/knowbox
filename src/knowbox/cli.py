@@ -38,15 +38,14 @@ Commands:
                               similar live-note pairs (embedding cosine) —
                               candidates for the judge pass (SKILL.md), not verdicts
   knowbox next-id             print next free id
-  knowbox init [DIR] [--no-git]  create an empty KB skeleton (default ~/kb)
+  knowbox init [DIR] [--no-git]  create an empty KB skeleton (default ~/knowbox)
   knowbox version             print version
 
-Environment: KNOWBOX_ROOT (KB dir; default ~/kb), KNOWBOX_LOCK_TIMEOUT,
+Environment: KNOWBOX_ROOT (KB dir; default ~/knowbox), KNOWBOX_LOCK_TIMEOUT,
   KNOWBOX_EMBED_URL, KNOWBOX_EMBED_MODEL, KNOWBOX_NO_FUSION,
   KNOWBOX_NO_RECENCY, KNOWBOX_NO_HEARTBEAT.
-  Deprecated fallback: each KB_* name is honored when its KNOWBOX_* twin is
-  unset (one release; dropped at 2.0). ANTHROPIC_AUTH_TOKEN (or the ai-box
-  token in ~/.claude/settings.json) authorizes embed/vsearch/fusion calls.
+  ANTHROPIC_AUTH_TOKEN (or the ai-box token in ~/.claude/settings.json)
+  authorizes embed/vsearch/fusion calls.
 """
 import hashlib
 import json
@@ -83,27 +82,24 @@ if IS_NT:
             pass  # already detached / replaced — nothing sensible to do
 
 def _env(suffix):
-    """KNOWBOX_<suffix> wins; KB_<suffix> is the deprecated fallback (one
-    release — dropped at 2.0). Returns "" when neither is set."""
-    v = os.environ.get(f"KNOWBOX_{suffix}", "").strip()
-    if v:
-        return v
-    return os.environ.get(f"KB_{suffix}", "").strip()
+    """KNOWBOX_<suffix> only (KB_* fallback dropped at 2.0). Returns "" when
+    unset."""
+    return os.environ.get(f"KNOWBOX_{suffix}", "").strip()
 
 
 KB = _env("ROOT")
 if KB:
     # explicit override (tests, sandboxes, worktrees). NEVER fall back
-    # silently — a bogus KNOWBOX_ROOT must fail loudly, not operate on ~/kb.
+    # silently — a bogus KNOWBOX_ROOT must fail loudly, not operate on ~/knowbox.
     if not os.path.isdir(KB):
         print(f"knowbox: KNOWBOX_ROOT={KB!r} is not a directory — refusing to "
-              f"fall back to ~/kb (fix KNOWBOX_ROOT or unset it)",
+              f"fall back to ~/knowbox (fix KNOWBOX_ROOT or unset it)",
               file=sys.stderr)
         sys.exit(2)
     KB = os.path.realpath(KB)
     _KB_FROM_ENV = True
 else:
-    KB = os.path.realpath(os.path.expanduser("~/kb"))
+    KB = os.path.realpath(os.path.expanduser("~/knowbox"))
     _KB_FROM_ENV = False
 
 
@@ -1768,7 +1764,7 @@ def cmd_new(args):
             build_db()
             build_index()
             append_log("create", nid, opts["title"])
-            git_commit(f"kb: create {nid} — {opts['title']}")
+            git_commit(f"knowbox: create {nid} — {opts['title']}")
     if interactive:
         # $EDITOR may take minutes — the flock must NOT be held across it
         # (P7). The note file already exists with its id, so a concurrent
@@ -1787,7 +1783,7 @@ def cmd_new(args):
             build_db()
             build_index()
             append_log("create", nid, opts["title"])
-            git_commit(f"kb: create {nid} — {opts['title']}")
+            git_commit(f"knowbox: create {nid} — {opts['title']}")
     print(path)
 
 
@@ -1812,7 +1808,7 @@ def cmd_touch(args):
                    + os.path.basename(p).split("-")[1]
                    if "-" in os.path.basename(p)
                    else os.path.basename(p), "touched")
-        git_commit(f"kb: touch {args[0]}")
+        git_commit(f"knowbox: touch {args[0]}")
     print(p)
 
 
@@ -1858,7 +1854,7 @@ def cmd_reindex(_args):
             print("reindex: no changes")
             return
         append_log("reindex", "—", f"{n} notes")
-        git_commit("kb: reindex")
+        git_commit("knowbox: reindex")
     print(f"index.md + FTS rebuilt from {n} notes")
 
 
@@ -2076,7 +2072,7 @@ def cmd_lint(_args):
     # F17 (kb-0117): the janitor lives on the Fedora server only — a replica
     # clone (native Windows, or any secondary machine) has no cron and the
     # heartbeat is gitignored, so a MISSING heartbeat there must not make lint
-    # permanently red. Opt out with KB_NO_HEARTBEAT=1; on Windows a
+    # permanently red. Opt out with KNOWBOX_NO_HEARTBEAT=1; on Windows a
     # never-present heartbeat auto-exempts (an EXISTING but stale one still
     # errors — someone installed a janitor there and it died).
     hb = os.path.join(KB, ".kb-heartbeat")
@@ -2086,13 +2082,13 @@ def cmd_lint(_args):
         pass  # replica client without a janitor — heartbeat not expected
     elif not os.path.exists(hb):
         errs.append("janitor heartbeat missing — weekly cron dead? run: "
-                    "bash ~/dotfiles/scripts/kb-janitor.sh (see kb-0014)")
+                    "bash ~/dotfiles/scripts/knowbox-janitor.sh (see kb-0014)")
     else:
         age_days = (datetime.now().timestamp() - os.path.getmtime(hb)) / 86400
         if age_days > HEARTBEAT_MAX_AGE_DAYS:
             errs.append(f"janitor heartbeat stale ({age_days:.0f}d > "
                         f"{HEARTBEAT_MAX_AGE_DAYS}d) — weekly cron dead? run: "
-                        f"bash ~/dotfiles/scripts/kb-janitor.sh (see kb-0014)")
+                        f"bash ~/dotfiles/scripts/knowbox-janitor.sh (see kb-0014)")
     # Waiver hygiene: malformed lines, unknown categories, and waivers that
     # suppressed nothing (data since fixed, note deleted, id typo'd) are
     # themselves WARNs — the file must never rot silently.
@@ -2159,7 +2155,7 @@ def cmd_verify(args):
         if touched:
             build_db()
             build_index()
-            git_commit(f"kb: verify {', '.join(touched)} — {ev}")
+            git_commit(f"knowbox: verify {', '.join(touched)} — {ev}")
     if touched:
         print(f"verified: {', '.join(touched)} (pushed if remote exists)")
 
@@ -2242,7 +2238,7 @@ def cmd_supersede(args):
         build_db()
         build_index()
         append_log("supersede", oid, f"superseded by {nid}")
-        git_commit(f"kb: supersede {oid} → {nid}")
+        git_commit(f"knowbox: supersede {oid} → {nid}")
     print(f"{oid} superseded by {nid}")
 
 
@@ -2583,10 +2579,10 @@ section-map note here. Full contract: https://github.com/qdgiang/knowbox
 
 
 def cmd_init(args):
-    """Create an empty KB skeleton (default ~/kb). Refuses to touch anything
+    """Create an empty KB skeleton (default ~/knowbox). Refuses to touch anything
     that already looks like a KB or a non-empty directory."""
     fl = _flags(args)
-    target = fl.get("_first") or os.path.expanduser("~/kb")
+    target = fl.get("_first") or os.path.expanduser("~/knowbox")
     target = os.path.realpath(target)
     if _looks_like_kb(target):
         sys.exit(f"knowbox: {target} already looks like a KB (has notes/) — "
@@ -2634,11 +2630,11 @@ def cmd_init(args):
         # repo-local identity (kb-0007): global user.name/email may be unset
         _git("config", "user.name", "kb")
         _git("config", "user.email", "kb@localhost")
-        git_commit("kb: init — empty KB skeleton")
+        git_commit("knowbox: init — empty KB skeleton")
     print(f"knowbox: initialized empty KB at {target}"
           + ("" if git_ok else " (no git repo)"))
     if not _env("ROOT"):
-        print("knowbox: this KB is the default root (~/kb). Point elsewhere "
+        print("knowbox: this KB is the default root (~/knowbox). Point elsewhere "
               "with KNOWBOX_ROOT=<dir>.")
 
 
@@ -2695,7 +2691,7 @@ def main(argv=None):
     if cmd not in CMDS:
         sys.exit(f"unknown command {cmd!r}. try: {', '.join(CMDS)}")
     # Loud fallback validation (locked decision): with KNOWBOX_ROOT unset the
-    # root is ~/kb — every command except `init` refuses to run against a
+    # root is ~/knowbox — every command except `init` refuses to run against a
     # directory that doesn't look like a KB instead of silently auto-creating.
     if cmd != "init" and not _KB_FROM_ENV and not _looks_like_kb(KB):
         print(f"knowbox: {KB} is not a knowledge base (no notes/ dir) — "

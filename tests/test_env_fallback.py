@@ -1,25 +1,27 @@
-"""KNOWBOX_*/KB_* env fallback policy (kb-0142 decision 5).
+"""KB_* env fallback removed at 2.0.0 (kb-0142 decision 5, 2026-10-09).
 
-KNOWBOX_* is primary; KB_* is honored as the deprecated one-release fallback
-(drop at 2.0). When both are set, KNOWBOX_* wins.
+Regression pin: with KNOWBOX_ROOT unset, a KB_ROOT pointing at a valid KB
+must be IGNORED — against an empty fake HOME the CLI must exit 2 with the
+init gate message, never silently use the KB_ROOT dir.
 """
-from conftest import build_sandbox, kb_run
+from conftest import build_sandbox
+
+from test_resolution import _fake_home_env, _fake_home_run
 
 
-def test_kb_root_honored_when_knowbox_root_unset(tmp_path):
+def test_kb_root_ignored_at_2_0(tmp_path):
     root = build_sandbox(tmp_path / "kb", corpus="mini", git=False)
-    r = kb_run("next-id", root=root,
-               env_extra={"KNOWBOX_ROOT": None, "KB_ROOT": str(root)},
-               expect_rc=0)
-    assert r.stdout.strip() == "kb-9013"
-
-
-def test_knowbox_root_wins_when_both_set(tmp_path):
-    a = build_sandbox(tmp_path / "kb", corpus="mini", git=False)
-    b = tmp_path / "does-not-exist"
-    # KB_ROOT points at the real sandbox; KNOWBOX_ROOT at a bogus dir —
-    # primary wins, so the bogus dir must trigger the loud exit 2.
-    r = kb_run("next-id", root=a,
-               env_extra={"KNOWBOX_ROOT": str(b), "KB_ROOT": str(a)})
+    home = tmp_path / "home"
+    home.mkdir()
+    env = _fake_home_env(home)
+    env["KB_ROOT"] = str(root)
+    import subprocess
+    from conftest import CLI_SRC, UV
+    r = subprocess.run(
+        [UV, "run", "--quiet", "--python", "3.12", "--script",
+         str(CLI_SRC), "next-id"],
+        capture_output=True, text=True, env=env,
+        stdin=subprocess.DEVNULL, timeout=180)
     assert r.returncode == 2
-    assert "KNOWBOX_ROOT" in (r.stdout + r.stderr)
+    out = r.stdout + r.stderr
+    assert "knowbox init" in out and "KNOWBOX_ROOT" in out

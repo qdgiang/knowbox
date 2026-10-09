@@ -1,9 +1,9 @@
 # knowbox
 
-Personal/agent knowledge-base CLI — the tool half of the `~/kb` setup.
+Personal/agent knowledge-base CLI — the tool half of the `~/knowbox` setup.
 Single-module, **stdlib-only** Python; runs under uv-managed Python 3.12+.
-Split out of the data repo (`qdgiang/kb`) on 2026-10: this repo carries **no
-notes** — installing it never fetches KB data.
+Split out of the data repo (now `qdgiang/knowbox-server-data`) on 2026-10:
+this repo carries **no notes** — installing it never fetches KB data.
 
 Markdown notes with YAML frontmatter are canonical; SQLite FTS5 index,
 `index.md` and embeddings are derived and rebuildable. Writes auto-commit
@@ -27,12 +27,12 @@ uv tool install --reinstall git+https://github.com/qdgiang/knowbox
 ## Bootstrap a KB
 
 ```sh
-knowbox init            # skeleton at ~/kb (notes/ refs/ raw/, git-initialized)
-knowbox init D:\kb      # custom location; then: export KNOWBOX_ROOT=D:\kb
+knowbox init            # skeleton at ~/knowbox (notes/ refs/ raw/, git-initialized)
+knowbox init D:\knowbox  # custom location; then: export KNOWBOX_ROOT=D:\knowbox
 ```
 
 Root resolution: `KNOWBOX_ROOT` if set (must exist — loud fail otherwise);
-else `~/kb`, validated at startup (must contain `notes/`; `knowbox init` is
+else `~/knowbox`, validated at startup (must contain `notes/`; `knowbox init` is
 exempt). There is no script-relative inference — the installed CLI lives in
 the uv tools venv, not in your KB.
 
@@ -40,7 +40,7 @@ the uv tools venv, not in your KB.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `KNOWBOX_ROOT` | `~/kb` | KB data root |
+| `KNOWBOX_ROOT` | `~/knowbox` | KB data root |
 | `KNOWBOX_EMBED_URL` | `https://api.ai-box.vn/v1/embeddings` | embeddings endpoint |
 | `KNOWBOX_EMBED_MODEL` | `text-embedding-v4` | embedding model |
 | `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_API_KEY` | — | embed token (fallback: `env.ANTHROPIC_AUTH_TOKEN` in `~/.claude/settings.json`) |
@@ -49,9 +49,8 @@ the uv tools venv, not in your KB.
 | `KNOWBOX_NO_HEARTBEAT` | — | exempt replica machines from the janitor-heartbeat lint |
 | `EDITOR` | — | `knowbox new` interactive body edit |
 
-**Deprecated:** legacy `KB_*` spellings (`KB_ROOT`, `KB_EMBED_URL`, …) are
-still honored as fallbacks for one release and will be dropped in 2.0.
-`KNOWBOX_*` always wins when both are set.
+**Removed at 2.0.0:** the legacy `KB_*` spellings (`KB_ROOT`, `KB_EMBED_URL`,
+…) are no longer honored — only `KNOWBOX_*` is read.
 
 ## Commands
 
@@ -70,7 +69,7 @@ uv run --script src/knowbox/cli.py --help   # script mode (no install)
 ```
 
 Tests invoke the CLI as a subprocess against synthetic sandbox KBs
-(`tests/conftest.py`); a hard guard blocks the production `~/kb`.
+(`tests/conftest.py`); a hard guard blocks the production `~/knowbox`.
 Goldens live in `tests/goldens/` — regenerate only via
 `tests/tools/capture_goldens.py` with a reviewed diff.
 

@@ -4,7 +4,7 @@ Pre-P7 the flock covered only `knowbox new`'s id+write window: derived rebuilds,
 log appends and git commits ran unlocked, touch/verify/supersede/reindex had
 no lock at all, and build_db/build_index/embed-store used FIXED `X.tmp` names
 that two concurrent rebuilds would remove-then-share. Now every write command
-is one critical section (KB_LOCK_TIMEOUT bounds the wait, then a loud exit),
+is one critical section (KNOWBOX_LOCK_TIMEOUT bounds the wait, then a loud exit),
 tmp names come from mkstemp, and `knowbox embed` locks only its final merge+write
 — never the HTTP phase.
 
@@ -52,12 +52,12 @@ def test_lock_timeout_exits_loud_and_writes_nothing(tmp_path):
     try:
         t0 = time.monotonic()
         r = kb_run("touch", "kb-9001", root=root,
-                   env_extra={"KB_LOCK_TIMEOUT": "2"})
+                   env_extra={"KNOWBOX_LOCK_TIMEOUT": "2"})
         dt = time.monotonic() - t0
         assert r.returncode != 0, "must fail loudly, not wait forever"
         out = r.stdout + r.stderr
         assert "lock held" in out and "lsof" in out, out
-        assert 1.5 <= dt < 10, f"KB_LOCK_TIMEOUT=2 not honored: waited {dt:.1f}s"
+        assert 1.5 <= dt < 10, f"KNOWBOX_LOCK_TIMEOUT=2 not honored: waited {dt:.1f}s"
         assert p.read_bytes() == before, "timed-out write touched the note"
     finally:
         holder.kill()
@@ -106,7 +106,7 @@ def test_concurrent_kb_new_race(tmp_path):
 
     # every commit+push reached the fake remote (serialized under the lock)
     remote_log = git_dir_run(bare, "log", "--oneline")
-    assert remote_log.count("kb: create") == 8, remote_log
+    assert remote_log.count("knowbox: create") == 8, remote_log
 
     # no fixed-name or mkstemp tmp residue anywhere in the KB root
     assert _tmp_residue(root) == []
@@ -215,7 +215,7 @@ def test_embed_lock_not_held_across_http(tmp_path):
         # embed is mid-HTTP (warmup or batch, 2.5 s per call): the flock must
         # be FREE — a touch with a 2 s lock timeout has to sail through.
         r = kb_run("touch", "kb-9002", root=root,
-                   env_extra={"KB_LOCK_TIMEOUT": "2"})
+                   env_extra={"KNOWBOX_LOCK_TIMEOUT": "2"})
         assert r.returncode == 0, (
             "touch blocked while embed was in its network phase — flock must "
             "not be held across HTTP: " + r.stdout + r.stderr)

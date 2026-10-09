@@ -13,7 +13,7 @@ _fusion_pass / RECENCY_* constants):
     kb-0109's structural guarantee at note ages > ~110d.
   - Labels-not-scores (kb-0038): the multiplier is never printed; the
     hybrid label gains "+ recency" only when recency actually reordered.
-  - Kill switch KB_NO_RECENCY (KB_NO_FUSION pattern) restores today's
+  - Kill switch KNOWBOX_NO_RECENCY (KNOWBOX_NO_FUSION pattern) restores today's
     ordering AND I/O profile byte-identically.
 
 House style: subprocess kb_run only — never import the CLI module in the pytest
@@ -21,7 +21,7 @@ process; pure-helper probes run their import in a SUBPROCESS.
 
 Dates are RELATIVE (today - N days) and sit deep inside the flat bands
 (≤30 → exactly 1.0; ≥120 → exactly 0.5) so a ±1d midnight drift cannot
-flip a band. Every E2E test first pins its KB_NO_RECENCY=1 baseline.
+flip a band. Every E2E test first pins its KNOWBOX_NO_RECENCY=1 baseline.
 
 Deliberately not covered (see plan):
   - zero-HTTP AND path: recency lives strictly behind `if not exact:` and
@@ -181,7 +181,7 @@ def _reorder_corpus(tmp_path):
 
 def test_recency_demotes_aged_below_fresh(tmp_path, mock_embed):
     root = _reorder_corpus(tmp_path)
-    base = _search(root, mock_embed, KB_NO_RECENCY="1")
+    base = _search(root, mock_embed, KNOWBOX_NO_RECENCY="1")
     assert search_ids(base.stdout) == ["kb-9130", "kb-9131", "kb-9132"]
     assert OLD_LABEL in base.stdout            # fusion fired (vec tail added)
 
@@ -201,13 +201,13 @@ def test_recency_demotes_aged_below_fresh(tmp_path, mock_embed):
 
 def test_kill_switch_inert_and_deterministic(tmp_path, mock_embed):
     root = _reorder_corpus(tmp_path)
-    k1 = _search(root, mock_embed, KB_NO_RECENCY="1")
-    k2 = _search(root, mock_embed, KB_NO_RECENCY="1")
+    k1 = _search(root, mock_embed, KNOWBOX_NO_RECENCY="1")
+    k2 = _search(root, mock_embed, KNOWBOX_NO_RECENCY="1")
     on = _search(root, mock_embed)
     assert k1.stdout == k2.stdout                       # byte-identical
     assert search_ids(on.stdout) != search_ids(k1.stdout)  # switch matters
-    nof_1 = _search(root, mock_embed, KB_NO_FUSION="1")
-    nof_2 = _search(root, mock_embed, KB_NO_FUSION="1", KB_NO_RECENCY="1")
+    nof_1 = _search(root, mock_embed, KNOWBOX_NO_FUSION="1")
+    nof_2 = _search(root, mock_embed, KNOWBOX_NO_FUSION="1", KNOWBOX_NO_RECENCY="1")
     assert nof_1.stdout == nof_2.stdout   # recency has no life outside fusion
     assert search_ids(nof_1.stdout) == ["kb-9130", "kb-9131"]  # lexical only
 
@@ -224,7 +224,7 @@ def test_offset_band_no_reorder(tmp_path, mock_embed):
          "delta band two body.\n", updated=_aged(28))
     _ext(root)
     _finish(root, {"kb-9132": _at_cos(QV, 0.90, "orth-rec-1")})
-    base = _search(root, mock_embed, KB_NO_RECENCY="1")
+    base = _search(root, mock_embed, KNOWBOX_NO_RECENCY="1")
     on = _search(root, mock_embed)
     assert search_ids(base.stdout) == ["kb-9133", "kb-9134", "kb-9132"]
     assert on.stdout == base.stdout        # both multipliers exactly 1.0
@@ -243,7 +243,7 @@ def test_floor_keeps_ancient_in_rrf_order(tmp_path, mock_embed):
          "delta floor two body.\n", updated=_aged(400))
     _ext(root)
     _finish(root, {"kb-9132": _at_cos(QV, 0.90, "orth-rec-1")})
-    base = _search(root, mock_embed, KB_NO_RECENCY="1")
+    base = _search(root, mock_embed, KNOWBOX_NO_RECENCY="1")
     on = _search(root, mock_embed)
     assert search_ids(base.stdout) == ["kb-9135", "kb-9136", "kb-9132"]
     assert on.stdout == base.stdout        # uniform 0.5 → stable sort
@@ -264,7 +264,7 @@ def test_future_dated_never_boosted(tmp_path, mock_embed):
          "delta future body.\n", updated=_aged(-10))
     _ext(root)
     _finish(root, {"kb-9132": _at_cos(QV, 0.90, "orth-rec-1")})
-    base = _search(root, mock_embed, KB_NO_RECENCY="1")
+    base = _search(root, mock_embed, KNOWBOX_NO_RECENCY="1")
     on = _search(root, mock_embed)
     assert search_ids(base.stdout) == ["kb-9137", "kb-9138", "kb-9132"]
     assert on.stdout == base.stdout
@@ -290,7 +290,7 @@ def test_missing_updated_falls_back_to_created(tmp_path, mock_embed):
          "delta fresh note body.\n", updated=_aged(5))
     _ext(root)
     _finish(root, {"kb-9132": _at_cos(QV, 0.90, "orth-rec-1")})
-    base = _search(root, mock_embed, KB_NO_RECENCY="1")
+    base = _search(root, mock_embed, KNOWBOX_NO_RECENCY="1")
     assert search_ids(base.stdout) == ["kb-9139", "kb-9131", "kb-9132"]
     on = _search(root, mock_embed)
     # created 200d ago → floor 0.5 → demoted below the fresh note
@@ -310,7 +310,7 @@ def test_malformed_date_is_neutral(tmp_path, mock_embed):
          "delta fresh note body.\n", updated=_aged(5))
     _ext(root)
     _finish(root, {"kb-9132": _at_cos(QV, 0.90, "orth-rec-1")})
-    base = _search(root, mock_embed, KB_NO_RECENCY="1")
+    base = _search(root, mock_embed, KNOWBOX_NO_RECENCY="1")
     on = _search(root, mock_embed)
     assert search_ids(base.stdout) == ["kb-9140", "kb-9131", "kb-9132"]
     assert on.stdout == base.stdout        # None age → 1.0 → no movement
@@ -331,7 +331,7 @@ def test_vec_only_never_outranks_lexical_under_recency(tmp_path, mock_embed):
          "delta lex ancient body.\n", updated=_aged(200))
     _ext(root)
     _finish(root, {"kb-9132": _at_cos(QV, 0.90, "orth-rec-1")})
-    base = _search(root, mock_embed, KB_NO_RECENCY="1")
+    base = _search(root, mock_embed, KNOWBOX_NO_RECENCY="1")
     assert search_ids(base.stdout) == ["kb-9141", "kb-9142", "kb-9132"]
     on = _search(root, mock_embed)
     assert search_ids(on.stdout) == ["kb-9141", "kb-9142", "kb-9132"]
@@ -356,7 +356,7 @@ def test_vec_only_block_reorders_within_tail(tmp_path, mock_embed):
         "kb-9143": _at_cos(QV, 0.90, "orth-rec-a"),   # vec rank 1, ancient
         "kb-9144": _at_cos(QV, 0.80, "orth-rec-b"),   # vec rank 2, fresh
     })
-    base = _search(root, mock_embed, KB_NO_RECENCY="1")
+    base = _search(root, mock_embed, KNOWBOX_NO_RECENCY="1")
     assert search_ids(base.stdout) == ["kb-9141", "kb-9143", "kb-9144"]
     on = _search(root, mock_embed)
     # aged EXT: 0.5 × 0.5/61 ≈ 0.0041 < fresh EXT: 1.0 × 0.5/62 ≈ 0.0082

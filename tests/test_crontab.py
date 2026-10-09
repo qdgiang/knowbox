@@ -39,10 +39,10 @@ def test_crontab_knowbox_paths_canary():
     text = CRONTAB.read_text()
     active = [l for l in text.splitlines()
               if l.strip() and not l.lstrip().startswith("#")]
-    janitor = [l for l in active if "kb-janitor" in l]
+    janitor = [l for l in active if "knowbox-janitor" in l]
     embed = [l for l in active if " embed" in l]
     assert janitor, "no janitor line in crontab"
-    assert any("dotfiles/scripts/kb-janitor.sh" in l for l in janitor), janitor
+    assert any("dotfiles/scripts/knowbox-janitor.sh" in l for l in janitor), janitor
     assert all("/kb/bin/" not in l for l in active), \
         f"crontab still references ~/kb/bin: {active}"
     if embed:

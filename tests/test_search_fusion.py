@@ -153,7 +153,7 @@ def test_dual_channel_agreement_reranks(tmp_path, mock_embed):
     root = _sandbox(tmp_path)
     _write_store(root, {"kb-9001": _vec(OR_QTEXT)})   # cos 1.0 with query
     base = kb_run("search", *OR_QUERY, root=root,
-                  env_extra=_env(mock_embed, KB_NO_FUSION="1"), expect_rc=0)
+                  env_extra=_env(mock_embed, KNOWBOX_NO_FUSION="1"), expect_rc=0)
     assert search_ids(base.stdout) == ["kb-9002", "kb-9001"]  # lex order
     assert "(hybrid re-rank" not in base.stdout
     fused = kb_run("search", *OR_QUERY, root=root,
@@ -225,7 +225,7 @@ def test_kill_switch_and_no_store_are_inert(tmp_path, mock_embed):
     _write_store(root, {"kb-9001": _vec(OR_QTEXT)})
     before = mock_embed.request_count
     killed = kb_run("search", *OR_QUERY, root=root,
-                    env_extra=_env(mock_embed, KB_NO_FUSION="1"),
+                    env_extra=_env(mock_embed, KNOWBOX_NO_FUSION="1"),
                     expect_rc=0)
     assert mock_embed.request_count - before == 0  # gate checked before HTTP
     assert killed.stdout == no_store.stdout        # byte-identical

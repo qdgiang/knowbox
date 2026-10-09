@@ -35,7 +35,7 @@ def test_init_git_repo_local_identity_one_commit_no_remote(tmp_path):
     assert git_run(root, "config", "user.email").strip() == "kb@localhost"
     assert git_run(root, "rev-list", "--count", "HEAD").strip() == "1"
     first = git_run(root, "log", "-1", "--format=%s").strip()
-    assert first == "kb: init — empty KB skeleton"
+    assert first == "knowbox: init — empty KB skeleton"
     assert git_run(root, "ls-files").split(), "first commit carries the skeleton"
     assert git_run(root, "remote").strip() == "", "init never adds a remote"
 
