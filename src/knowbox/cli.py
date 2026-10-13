@@ -37,6 +37,9 @@ Commands:
   knowbox conflicts [--top N] [--min-cos X] [--json]
                               similar live-note pairs (embedding cosine) —
                               candidates for the judge pass (SKILL.md), not verdicts
+  knowbox raw-backlog         list unreviewed raw/ entries (## heading blocks)
+  knowbox raw-mark <file> <N> --note kb-XXXX | --rejected "reason"
+                              stamp an entry's `> state:` review marker
   knowbox next-id             print next free id
   knowbox init [DIR] [--no-git]  create an empty KB skeleton (default ~/knowbox)
   knowbox version             print version
@@ -104,10 +107,11 @@ else:
 
 
 def _use_kb(root):
-    global KB, NOTES, REFS, DB, INDEX, LOG, EMBED
+    global KB, NOTES, REFS, RAW, DB, INDEX, LOG, EMBED
     KB = root
     NOTES = os.path.join(KB, "notes")
     REFS = os.path.join(KB, "refs")
+    RAW = os.path.join(KB, "raw")
     DB = os.path.join(KB, ".kb.db")
     INDEX = os.path.join(KB, "index.md")
     LOG = os.path.join(KB, "log.md")
@@ -1906,6 +1910,159 @@ def _load_waivers():
     return waivers, malformed
 
 
+# ---------- raw/ staging backlog (kb-0149 design) ----------
+# raw/ files are append-only entry streams: a `## ` heading starts an entry,
+# the entry runs to the next `## `/EOF (bodies use ### and deeper ONLY — the
+# "no nested-level heading" rule). Review state is a marker as the FIRST
+# line under the heading: `> state: ingested kb-XXXX (date)` /
+# `> state: rejected <reason>`. Legacy markers (`> ingested:` /
+# `> rejected:` ANYWHERE in the block, incl. at the block's end — the
+# distill-era form) still resolve the entry; new writes use only the new
+# form. A legacy marker in the PREAMBLE (above the first heading) resolves
+# nothing but skews the janitor's cardinality count → lint WARN.
+
+_RAW_HEADING_RE = re.compile(r"^## (?!#)(.*)$")
+_RAW_STATE_RE = re.compile(r"^> state: (ingested|rejected)\b")
+_RAW_LEGACY_RE = re.compile(r"^> (?:ingested|rejected):")
+# `## pair: kb-XXXX kb-YYYY` conflict-judge verdicts are review records, not
+# ingest candidates — exempt by prefix, not by filename, so the parser stays
+# content-driven (any file may hold judge blocks).
+_RAW_ENTRY_EXEMPT_PREFIXES = ("pair:",)
+# lint WARN threshold for session-distill-* files only (the distill pipeline's
+# own janitor alert already watches the total; lint only flags a file when the
+# pile-up is well past routine review cadence). Human-note files warn at 1.
+RAW_BACKLOG_WARN_MIN = 5
+
+
+def _scan_raw_file(path):
+    """Parse one raw/ file → (entries, orphan_markers). entries: list of
+    dicts — file (basename), n (1-based entry number), title (heading
+    text), resolved (bool). orphan_markers: count of legacy
+    `> ingested:`/`> rejected:` lines in the PREAMBLE (before the first
+    `## ` heading) — they resolve no entry but the janitor's cardinality
+    grep counts them, silently skewing its backlog number."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            lines = f.read().splitlines()
+    except (OSError, UnicodeDecodeError):
+        return [], 0
+    entries = []
+    orphans = 0
+    seen_heading = False
+    for i, ln in enumerate(lines):
+        m = _RAW_HEADING_RE.match(ln)
+        if not m:
+            if not seen_heading and _RAW_LEGACY_RE.match(ln):
+                orphans += 1
+            continue
+        seen_heading = True
+        title = m.group(1).strip()
+        if any(title.lower().startswith(p) for p in _RAW_ENTRY_EXEMPT_PREFIXES):
+            continue
+        j = i + 1
+        end = len(lines)
+        while j < end and not _RAW_HEADING_RE.match(lines[j]):
+            j += 1
+        block = lines[i + 1:j]
+        new_form = bool(block) and bool(_RAW_STATE_RE.match(block[0]))
+        legacy = any(_RAW_LEGACY_RE.match(b) for b in block)
+        entries.append({"file": os.path.basename(path),
+                        "n": len(entries) + 1, "title": title,
+                        "resolved": new_form or legacy})
+    return entries, orphans
+
+
+def _raw_backlog():
+    """(entries, orphans_by_file) across raw/*.md, oldest file first
+    (stable scan order — raw-mark and lint must agree with raw-backlog
+    listings)."""
+    entries, orphans = [], {}
+    if os.path.isdir(RAW):
+        for fn in sorted(os.listdir(RAW)):
+            if fn.endswith(".md"):
+                ents, n_orph = _scan_raw_file(os.path.join(RAW, fn))
+                entries.extend(ents)
+                if n_orph:
+                    orphans[fn] = n_orph
+    return entries, orphans
+
+
+def cmd_raw_backlog(_args):
+    entries, _ = _raw_backlog()
+    open_ = [e for e in entries if not e["resolved"]]
+    print(f"raw backlog: {len(open_)} unreviewed of {len(entries)} entries")
+    for e in open_:
+        print(f"  {e['file']} #{e['n']}: {e['title']}")
+    if open_:
+        print("\nmark after ingest: knowbox raw-mark <file> <N> "
+              "--note kb-XXXX | --rejected \"reason\"")
+
+
+def cmd_raw_mark(args):
+    opts = _flags(args)
+    pos = opts.get("_pos", [])
+    note, rejected = opts.get("note", ""), opts.get("rejected", "")
+    if len(pos) != 2 or (bool(note) == bool(rejected)):
+        sys.exit("usage: knowbox raw-mark <file> <N> --note kb-XXXX | "
+                 "--rejected \"reason\"")
+    fname, n_s = pos
+    if "/" in fname or "\\" in fname or fname in (".", "..") or \
+            not fname.endswith(".md"):
+        sys.exit(f"knowbox raw-mark: bad raw filename {fname!r} "
+                 "(basename of a .md file inside raw/)")
+    path = os.path.join(RAW, fname)
+    if not os.path.isfile(path):
+        sys.exit(f"not found: raw/{fname}")
+    try:
+        n = int(n_s)
+    except ValueError:
+        sys.exit(f"knowbox raw-mark: entry number must be an integer, "
+                 f"got {n_s!r}")
+    if note and not ID_RE.match(note):
+        sys.exit(f"knowbox raw-mark: --note must be a kb-id, got {note!r}")
+    entries, _ = _scan_raw_file(path)
+    if not (1 <= n <= len(entries)):
+        sys.exit(f"knowbox raw-mark: {fname} has {len(entries)} entries, "
+                 f"no #{n}")
+    e = entries[n - 1]
+    if e["resolved"]:
+        sys.exit(f"knowbox raw-mark: {fname} #{n} ({e['title']!r}) is "
+                 "already marked")
+    marker = (f"> state: ingested {note} ({date.today().isoformat()})"
+              if note else
+              f"> state: rejected {rejected} ({date.today().isoformat()})")
+    with _locked():
+        with open(path, "rb") as f:
+            lines = f.read().decode("utf-8").splitlines(keepends=True)
+        # nth non-exempt entry heading, re-found byte-exactly under the
+        # lock (n is the global entry index, so count ALL entry headings —
+        # not just same-title ones — then verify the title)
+        seen, at = 0, None
+        for i, ln in enumerate(lines):
+            m = _RAW_HEADING_RE.match(ln.rstrip("\r\n"))
+            if not m:
+                continue
+            title = m.group(1).strip()
+            if any(title.lower().startswith(p)
+                   for p in _RAW_ENTRY_EXEMPT_PREFIXES):
+                continue
+            seen += 1
+            if seen == n:
+                at = i
+                break
+        if at is None:
+            sys.exit(f"knowbox raw-mark: entry #{n} vanished mid-write — "
+                     "retry (file changed under us?)")
+        found = lines[at].rstrip("\r\n")
+        if _RAW_HEADING_RE.match(found).group(1).strip() != e["title"]:
+            sys.exit(f"knowbox raw-mark: entry #{n} title changed mid-write "
+                     f"(now {found!r}) — retry")
+        lines.insert(at + 1, marker + "\n")
+        _atomic_write_bytes(path, "".join(lines).encode("utf-8"))
+        git_commit(f"knowbox: raw-mark {fname} #{n}")
+    print(f"marked {fname} #{n}: {e['title']} -> {marker[2:]}")
+
+
 def cmd_lint(_args):
     errs, warns = [], []
     waivers, waiver_malformed = _load_waivers()
@@ -2067,6 +2224,39 @@ def cmd_lint(_args):
                                    or rep["orphans"]):
         errs.append("index.md missing or content drift (hand-edited?) → "
                     "run `knowbox reindex`")
+    # raw/ staging health (kb-0149): `## ` headings are entry boundaries —
+    # entries need a review marker or they are backlog. Uses the SAME
+    # scanner as raw-backlog/raw-mark so all three always agree. Knowledge
+    # stays per-entry (the WARN names the file + count, not the backlog
+    # total), so `lint-waivers.md`-style suppression is per-file.
+    entries, orphans = _raw_backlog()
+    for fn, n_orph in sorted(orphans.items()):
+        warns.append(f"raw/{fn}: {n_orph} orphan legacy marker"
+                     f"{'s' if n_orph != 1 else ''} in the preamble (above "
+                     "the first `## ` heading) — they resolve no entry but "
+                     "skew the janitor's backlog count; attach each to its "
+                     "entry's block")
+    raw_by_file = {}
+    for e in entries:
+        raw_by_file.setdefault(e["file"], []).append(e)
+    for fn in sorted(raw_by_file):
+        open_ = [e for e in raw_by_file[fn] if not e["resolved"]]
+        if not open_:
+            continue
+        if fn.startswith("session-distill-"):
+            # distill backlog has its own janitor alert + raw-backlog
+            # listing; a per-file lint WARN would double-signal every file
+            if len(open_) > RAW_BACKLOG_WARN_MIN:
+                warns.append(
+                    f"raw/{fn}: distill backlog: {len(open_)} unreviewed "
+                    f"proposals (> {RAW_BACKLOG_WARN_MIN}) — promote or "
+                    "reject via the knowbox skill + `knowbox raw-mark`")
+        else:
+            warns.append(
+                f"raw/{fn}: {len(open_)} unreviewed entr"
+                f"{'ies' if len(open_) != 1 else 'y'} — ingest via the "
+                "knowbox skill, then `knowbox raw-mark <file> <N> "
+                "--note kb-XXXX | --rejected \"reason\"`")
     # janitor dead-man's switch (kb-0014): the weekly cron run touches
     # .kb-heartbeat; missing/old means the cron is dead — fail loudly.
     # F17 (kb-0117): the janitor lives on the Fedora server only — a replica
@@ -2575,6 +2765,13 @@ confidence, triggers, verified.
 
 Body: free markdown. Large docs go whole into refs/ with a type: reference
 section-map note here. Full contract: https://github.com/qdgiang/knowbox
+
+raw/ (staging, append-only): `## ` headings delimit entries (bodies use
+### and deeper ONLY). Reviewed entries carry a marker as the FIRST line
+under the heading: `> state: ingested kb-XXXX (date)` / `> state: rejected
+<reason>` — `knowbox raw-backlog` lists unmarked entries, `knowbox raw-mark
+<file> <N> --note kb-XXXX | --rejected "reason"` stamps them. Never delete
+entries; legacy `> ingested:`/`> rejected:` lines still resolve an entry.
 """
 
 
@@ -2676,6 +2873,7 @@ CMDS = {"search": cmd_search, "expand": cmd_expand, "show": cmd_show,
         "lint": cmd_lint, "stale": cmd_stale, "churn": cmd_churn,
         "refs": cmd_refs,
         "conflicts": cmd_conflicts, "next-id": cmd_next_id,
+        "raw-backlog": cmd_raw_backlog, "raw-mark": cmd_raw_mark,
         "init": cmd_init}
 
 

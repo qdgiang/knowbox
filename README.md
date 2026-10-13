@@ -60,6 +60,12 @@ gated semantic fusion, typo/semantic/refs rescue), `expand`, `show`, `list`,
 `reindex`, `lint`, `stale`, `churn`, `refs`, `conflicts`, `next-id`, `init`,
 `version`.
 
+raw/ staging (human/Obsidian drafts + distill proposals): `raw-backlog`
+lists unreviewed `## ` entry blocks; `raw-mark <file> <N> --note kb-XXXX |
+--rejected "reason"` inserts the `> state:` marker as the first line under
+the entry's heading and auto-commits. Legacy `> ingested:`/`> rejected:`
+markers anywhere in a block still resolve it.
+
 ## Development
 
 ```sh
