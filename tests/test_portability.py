@@ -23,7 +23,13 @@ from pathlib import Path
 
 from conftest import CLI_SRC, REPO, UV, build_sandbox, kb_run, note_path
 
+# Post-split (paths.py + sysutil.py, refactor step 1): fences point at the
+# OWNING module's source; ALL_SRC aggregates every knowbox source file for
+# fences that are location-independent (counts across the whole package).
 KB_SRC = CLI_SRC.read_text(encoding="utf-8")
+SYSUTIL_SRC = (CLI_SRC.parent / "sysutil.py").read_text(encoding="utf-8")
+ALL_SRC = "".join(p.read_text(encoding="utf-8")
+                  for p in sorted(CLI_SRC.parent.glob("*.py")))
 
 PROBE_HEADER = (
     "import importlib.machinery, importlib.util, json, os, tempfile\n"
@@ -55,50 +61,60 @@ def _probe(tmp_path, root, body, timeout=120):
 def test_fence_no_top_level_fcntl():
     # A1: a top-level `import fcntl` kills EVERY command on Windows at module
     # load. It must live only inside the else: branch of the IS_NT guard.
-    lines = KB_SRC.splitlines()
+    # Owner: sysutil.py (the IS_NT guard + both platform imports moved there).
+    lines = SYSUTIL_SRC.splitlines()
     for i, ln in enumerate(lines):
         if ln.strip() == "import fcntl":
             assert ln.startswith((" ", "\t")), \
                 f"line {i+1}: fcntl imported unconditionally (A1 regression)"
-    assert "import msvcrt" in KB_SRC
-    assert "IS_NT = os.name == \"nt\"" in KB_SRC
+    assert "import msvcrt" in SYSUTIL_SRC
+    assert "IS_NT = os.name == \"nt\"" in SYSUTIL_SRC
 
 
 def test_fence_stdio_reconfigure_present():
     # A3: piped cp1252 stdout crashes on the first em-dash — agent harnesses
     # ALWAYS pipe, so this is a hard blocker on native Windows.
-    assert 'reconfigure(encoding="utf-8"' in KB_SRC
+    assert 'reconfigure(encoding="utf-8"' in SYSUTIL_SRC
 
 
 def test_fence_text_writers_pin_lf():
-    # D9: index.md, log.md, miss-log, note-create must all pass newline="\n"
-    assert KB_SRC.count('newline="\\n"') >= 4
+    # D9: index.md, log.md, miss-log, note-create must all pass newline="\n".
+    # Aggregated across ALL module sources: the writers live in different
+    # modules post-split (A4), no single module owns ≥4 sites.
+    assert ALL_SRC.count('newline="\\n"') >= 4
 
 
 def test_fence_no_direct_os_replace():
     # C7: every swap goes through _replace_retry (the Windows replace-over-
     # open-file retry); the only os.replace( left is inside the helper.
-    assert KB_SRC.count("os.replace(") == 1
-    assert "_replace_retry(tmp, path)" in KB_SRC      # _atomic_write_bytes
-    assert "_replace_retry(tmp, dest)" in KB_SRC      # _swap_into_place
+    # Owner: sysutil.py.
+    assert SYSUTIL_SRC.count("os.replace(") == 1
+    assert "_replace_retry(tmp, path)" in SYSUTIL_SRC      # _atomic_write_bytes
+    assert "_replace_retry(tmp, dest)" in SYSUTIL_SRC      # _swap_into_place
 
 
 def test_fence_no_hand_built_sqlite_uri():
     # C8: file:{DB}?mode=ro breaks silently on Windows paths (?/#/% or
-    # backslash edge) → db_missing=True → rebuild-forever loop.
-    assert "?mode=ro" not in KB_SRC
+    # backslash edge) → db_missing=True → rebuild-forever loop. Aggregate:
+    # the DB readers move between modules as the split proceeds.
+    assert "?mode=ro" not in ALL_SRC
 
 
 def test_fence_editor_and_heartbeat_gates():
-    assert "posix=not IS_NT" in KB_SRC          # F16 shlex backslash trap
-    assert '"notepad" if IS_NT else "vi"' in KB_SRC
-    assert '_env("NO_HEARTBEAT")' in KB_SRC    # F17 replica-client gate
-    assert 'encoding="utf-8", errors="replace"' in KB_SRC  # B4 git decodes
+    # Post-commands-split: the editor default moved to cmdwrite.py (cmd_new),
+    # heartbeat gate to maintain.py (cmd_lint), git decodes to notes.py /
+    # reports.py — no single module owns them all; aggregate (A4 pattern).
+    assert "posix=not IS_NT" in ALL_SRC          # F16 shlex backslash trap
+    assert '"notepad" if IS_NT else "vi"' in ALL_SRC
+    assert '_env("NO_HEARTBEAT")' in ALL_SRC    # F17 replica-client gate
+    assert 'encoding="utf-8", errors="replace"' in ALL_SRC  # B4 git decodes
 
 
 def test_fence_gitattributes_shipped_by_git_commit():
-    # the new repo file must ride the auto-commit path list, or it never ships
-    assert '".gitattributes"' in KB_SRC
+    # the new repo file must ride the auto-commit path list, or it never ships.
+    # Owner: notes.py (git_commit moved there in the split).
+    assert '".gitattributes"' in (CLI_SRC.parent / "notes.py") \
+        .read_text(encoding="utf-8")
 
 
 # --------------------------------------------------------------------------
@@ -118,7 +134,11 @@ def test_replace_retry_retries_then_succeeds(tmp_path):
         "    if calls['n'] < 3:\n"
         "        raise PermissionError('simulated AV/reader hold')\n"
         "    return real(a, b)\n"
-        "m.IS_NT = True\n"
+        # A3 (post-split): _replace_retry reads IS_NT from ITS OWN module —
+        # mutate the owning module (sysutil, already in sys.modules via
+        # cli.py's import), not the kbmod re-export.
+        "import sysutil\n"
+        "sysutil.IS_NT = True\n"
         "os.replace = flaky\n"
         "try:\n"
         "    m._replace_retry(src, dst, attempts=5, delay=0)\n"
@@ -141,7 +161,8 @@ def test_replace_retry_reraises_immediately_off_nt(tmp_path):
         "def always(a, b):\n"
         "    calls['n'] += 1\n"
         "    raise PermissionError('a POSIX perms problem is real — no retry')\n"
-        "m.IS_NT = False\n"
+        "import sysutil\n"
+        "sysutil.IS_NT = False\n"
         "os.replace = always\n"
         "raised = False\n"
         "try:\n"
@@ -153,6 +174,33 @@ def test_replace_retry_reraises_immediately_off_nt(tmp_path):
     assert r.returncode == 0, r.stderr
     out = json.loads(r.stdout.strip().splitlines()[-1])
     assert out == {"raised": True, "calls": 1}
+
+
+def test_use_kb_reroots_all_eight_paths_globals(tmp_path):
+    # A5: paths.py owns all 8 root globals; _use_kb re-root must propagate to
+    # every one of them (cmd_init depends on it — a half-propagated root would
+    # write notes to the new KB and the DB to the old one).
+    root = build_sandbox(tmp_path / "kb")
+    r = _probe(tmp_path, root, (
+        "import paths\n"
+        "d = tempfile.mkdtemp()\n"
+        "m._use_kb(d)\n"
+        "exp = {\n"
+        "    'KB': d,\n"
+        "    'NOTES': os.path.join(d, 'notes'),\n"
+        "    'REFS': os.path.join(d, 'refs'),\n"
+        "    'RAW': os.path.join(d, 'raw'),\n"
+        "    'DB': os.path.join(d, '.kb.db'),\n"
+        "    'INDEX': os.path.join(d, 'index.md'),\n"
+        "    'LOG': os.path.join(d, 'log.md'),\n"
+        "    'EMBED': os.path.join(d, '.kb-embed.json'),\n"
+        "}\n"
+        "got = {k: getattr(paths, k) for k in exp}\n"
+        "print(json.dumps({'ok': got == exp}))\n"
+    ))
+    assert r.returncode == 0, r.stderr
+    out = json.loads(r.stdout.strip().splitlines()[-1])
+    assert out == {"ok": True}
 
 
 def test_lock_acquire_contention_roundtrip_posix(tmp_path):
