@@ -98,17 +98,23 @@ def cmd_init(args):
                   "(KB works without it; no auto-commits)", file=sys.stderr)
     if git_ok:
         def _git(*argv):
+            # returns False on failure — a wedged git mid-init must not
+            # sys.exit (the dir already looks like a KB; re-init would be
+            # refused). Fall through to the "(no git repo)" path instead.
             r = subprocess.run(["git", "-C", target, *argv], check=False,
                                capture_output=True, text=True,
                                encoding="utf-8", errors="replace")
             if r.returncode != 0:
-                sys.exit(f"knowbox: git {' '.join(argv[:1])} failed: "
-                         f"{r.stderr.strip()[:200]}")
-        _git("init", "-q", "-b", "main")
+                print(f"knowbox: git {' '.join(argv[:1])} failed: "
+                      f"{r.stderr.strip()[:200]}", file=sys.stderr)
+                return False
+            return True
         # repo-local identity (kb-0007): global user.name/email may be unset
-        _git("config", "user.name", "kb")
-        _git("config", "user.email", "kb@localhost")
-        git_commit("knowbox: init — empty KB skeleton")
+        git_ok = (_git("init", "-q", "-b", "main")
+                  and _git("config", "user.name", "kb")
+                  and _git("config", "user.email", "kb@localhost"))
+        if git_ok:
+            git_commit("knowbox: init — empty KB skeleton")
     print(f"knowbox: initialized empty KB at {target}"
           + ("" if git_ok else " (no git repo)"))
     if not _env("ROOT"):

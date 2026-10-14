@@ -308,12 +308,14 @@ def git_commit(msg):
         # text=True alone decodes with the locale codec (cp1252 on Windows)
         r = subprocess.run(["git", "-C", paths.KB, "add", *stage],
                            check=False, capture_output=True, text=True,
+                           timeout=60,
                            encoding="utf-8", errors="replace")
         if r.returncode != 0:
             print(f"knowbox: git add failed: {r.stderr.strip()[:120]}",
                   file=sys.stderr)
         r = subprocess.run(["git", "-C", paths.KB, "commit", "-q", "-m", msg],
                            check=False, capture_output=True, text=True,
+                           timeout=60,
                            encoding="utf-8", errors="replace")
         if r.returncode not in (0, 1):  # 1 = nothing to commit
             print(f"knowbox: git commit failed: {r.stderr.strip()[:120]}",
@@ -328,8 +330,10 @@ def git_commit(msg):
             if r.returncode != 0:
                 print(f"knowbox: push failed (offline?): {r.stderr.strip()[:120]}",
                       file=sys.stderr)
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        print("knowbox: git push timed out (offline?) — will retry next write",
+    except FileNotFoundError:
+        print("knowbox: git not found — skipping auto-commit", file=sys.stderr)
+    except subprocess.TimeoutExpired:
+        print("knowbox: git op timed out (offline?) — will retry next write",
               file=sys.stderr)
 
 

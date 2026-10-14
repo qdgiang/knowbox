@@ -106,10 +106,12 @@ def cmd_churn(args):
              "-c", "diff.noprefix=false", "-c", "diff.external=", "log",
              f"--since={window} days ago", "-U0", "--no-color", "-M",
              "--pretty=format:%x01%cs", "--", "notes/"],
-            capture_output=True, text=True,
+            capture_output=True, text=True, timeout=60,
             encoding="utf-8", errors="replace")
     except FileNotFoundError:
         sys.exit("knowbox churn: git not found")
+    except subprocess.TimeoutExpired:
+        sys.exit("knowbox churn: git log timed out")
     if res.returncode != 0:
         sys.exit(f"knowbox churn: git log failed: {res.stderr.strip()}")
     DATE_ONLY = re.compile(r"^[+-](updated|verified): ")
