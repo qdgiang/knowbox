@@ -23,6 +23,8 @@ def cmd_show(args):
     if not args:
         sys.exit("usage: knowbox show ID|SLUG")
     p = find_path(args[0])
+    if p == "AMBIGUOUS":
+        sys.exit(2)
     if not p:
         sys.exit(f"not found: {args[0]}")
     # deliberately RAW (never parse_note, P4/T7): a malformed note —
@@ -174,6 +176,8 @@ def cmd_touch(args):
         sys.exit("usage: knowbox touch ID")
     with _locked():  # P7: whole write span under the lock (was: none)
         p = find_path(args[0])
+        if p == "AMBIGUOUS":
+            sys.exit(2)
         if not p:
             sys.exit(f"not found: {args[0]}")
         # guarded rewrite (P4/T5): frontmatter slice only. A note whose fm
@@ -250,6 +254,8 @@ def cmd_verify(args):
     with _locked():  # P7: whole batch (fm rewrites + rebuilds + commit) locked
         for nid in ids:
             p = find_path(nid)
+            if p == "AMBIGUOUS":
+                continue  # hint already printed; no contradictory "not found"
             if not p:
                 print(f"not found: {nid}")
                 continue
@@ -289,6 +295,8 @@ def cmd_supersede(args):
         sys.exit("usage: knowbox supersede OLD --with NEW")
     with _locked():  # P7: whole two-phase supersede under the lock
         po, pn = find_path(pos[0]), find_path(opts["with"])
+        if po == "AMBIGUOUS" or pn == "AMBIGUOUS":
+            sys.exit(2)
         if not po:
             sys.exit(f"not found: {pos[0]}")
         if not pn:

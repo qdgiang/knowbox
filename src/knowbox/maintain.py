@@ -1,6 +1,6 @@
-"""knowbox maintain: reindex + lint (with waivers) + the raw/ staging
-backlog commands. Owns the raw/ entry scanner — raw-backlog, raw-mark and
-lint share it so all three always agree.
+"""knowbox maintain: lint (with waivers) + the raw/ staging backlog
+commands. Owns the raw/ entry scanner — raw-backlog, raw-mark and lint
+share it so all three always agree.
 """
 import os
 import re
@@ -10,9 +10,8 @@ from datetime import date, datetime
 
 import paths
 from _flags import _flags
-from index import _freshness_report, build_db, build_index
-from notes import (PARSE_FAILURES, _aslist, _asstr, _days_since, all_notes,
-                   append_log, git_commit, next_id)
+from index import _freshness_report
+from notes import PARSE_FAILURES, _aslist, all_notes, git_commit
 from paths import (DATE_RE, ENUMS, HEARTBEAT_MAX_AGE_DAYS, ID_PREFIX_RE,
                    ID_RE, REQUIRED, WIKILINK_RE, _env)
 from sysutil import IS_NT, _atomic_write_bytes, _locked
@@ -458,44 +457,3 @@ def cmd_lint(_args):
         for w in waived:
             print(f"  {w}")
     sys.exit(1 if errs else 0)
-
-
-def cmd_stale(args):
-    """knowbox stale [--days N] — rank live notes by staleness (default threshold 90d)."""
-    opts = _flags(args)
-    try:
-        threshold = int(opts.get("days", "90"))
-    except ValueError:
-        sys.exit("knowbox stale: --days must be an integer")
-    if threshold < 1:
-        sys.exit("knowbox stale: --days must be >= 1")
-    rows = []
-    for _rel, meta, _body in all_notes():
-        if str(meta.get("status", "")) == "superseded":
-            continue
-        upd = str(meta.get("updated") or meta.get("created") or "")
-        age = _days_since(upd)
-        ver = str(meta.get("verified") or "")
-        flags = []
-        if age is not None and age >= threshold:
-            flags.append("STALE")
-        if not ver and age is not None and age >= threshold // 2:
-            flags.append("NEVER-VERIFIED")
-        rows.append((age if age is not None else -1, "+".join(flags),
-                     meta.get("id", "?"), str(meta.get("status", "?")),
-                     upd or "?", ver or "never", _asstr(meta.get("title"))))
-    if not rows:
-        print("knowbox stale: no live notes found")
-        return
-    rows.sort(key=lambda r: (-r[0], r[2]))
-    print(f"knowbox stale — live notes ranked by staleness (threshold: {threshold}d, "
-          f"never-verified flag at {threshold // 2}d)")
-    print(f"{'flag':16} {'id':8} {'status':9} {'updated':11} {'age':>4} {'verified':11} title")
-    for age, flags, nid, status, upd, ver, title in rows:
-        print(f"{flags:16} {nid:8} {status:9} {upd:11} {age:>3}d {ver:11} {title[:58]}")
-    flagged = [r for r in rows if r[1]]
-    print(f"\n{len(rows)} live note(s); oldest update {rows[0][0]}d ago; "
-          f"{len(flagged)} flagged")
-    if flagged:
-        print("act on flags: re-verify with 'knowbox verify ID --evidence …', "
-              "update, or supersede.")

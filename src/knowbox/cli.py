@@ -50,15 +50,8 @@ Environment: KNOWBOX_ROOT (KB dir; default ~/knowbox), KNOWBOX_LOCK_TIMEOUT,
   ANTHROPIC_AUTH_TOKEN (or the ai-box token in ~/.claude/settings.json)
   authorizes embed/vsearch/fusion calls.
 """
-import hashlib
-import json
 import os
-import re
-import shlex
-import sqlite3
-import subprocess
 import sys
-from datetime import date, datetime
 
 # PEP 723 script mode (`uv run --script src/knowbox/cli.py`): the package dir
 # is not on sys.path for a direct script run, and helper modules are imported
@@ -72,7 +65,6 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 # and touch private helpers on ITS namespace — re-export every moved name
 # explicitly (import * drops underscore names).
 import paths
-import sysutil
 from paths import (                          # noqa: F401
     _KB_FROM_ENV, _env, _use_kb, _looks_like_kb,
     ENUMS, REQUIRED, DATE_RE, ID_RE, HEARTBEAT_MAX_AGE_DAYS)
@@ -108,8 +100,8 @@ from cmdsearch import cmd_expand, cmd_search
 from cmdwrite import (cmd_list, cmd_new, cmd_next_id, cmd_recent, cmd_reindex,
                       cmd_show, cmd_supersede, cmd_touch, cmd_verify)
 from initcmd import _version, cmd_init
-from maintain import (cmd_lint, cmd_raw_backlog, cmd_raw_mark, cmd_stale)
-from reports import cmd_churn, cmd_conflicts, cmd_refs
+from maintain import cmd_lint, cmd_raw_backlog, cmd_raw_mark
+from reports import cmd_churn, cmd_conflicts, cmd_refs, cmd_stale
 from sembed import cmd_embed, cmd_vsearch
 
 CMDS = {"search": cmd_search, "expand": cmd_expand, "show": cmd_show,

@@ -274,7 +274,9 @@ def find_path(id_or_slug):
               + ", ".join(h.split("-")[0] + "-" + h.split("-")[1]
                           for h in hits[:6])
               + " — use the full kb-id", file=sys.stderr)
-        return None
+        # sentinel: callers must exit(2) without printing a contradictory
+        # "not found" on top of this message
+        return "AMBIGUOUS"
     if hits:
         return os.path.join(paths.NOTES, hits[0])
     return None

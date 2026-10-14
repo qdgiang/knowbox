@@ -34,6 +34,8 @@ def cmd_search(args):
     # is for corpus files, not user queries.
     if len(args) == 1 and re.match(r"^kb-\d+$", args[0].lower()):
         p = find_path(args[0].lower())
+        if p == "AMBIGUOUS":
+            sys.exit(2)  # hint printed; do NOT fall through to full-text
         if p:
             # forward slashes on every platform (kb-0117 E10): relpath emits
             # backslashes on Windows, breaking goldens and path conventions
@@ -132,6 +134,8 @@ def cmd_expand(args):
     if not 1 <= depth <= EXPAND_MAX_DEPTH:
         sys.exit(f"knowbox expand: --depth must be 1 or {EXPAND_MAX_DEPTH}")
     p = find_path(target)
+    if p == "AMBIGUOUS":
+        sys.exit(2)
     m = ID_PREFIX_RE.match(os.path.basename(p)) if p else None
     if not p or not m:
         sys.exit(f"knowbox expand: no note for {target!r}")
