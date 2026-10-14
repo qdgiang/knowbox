@@ -9,7 +9,8 @@ import os
 
 import paths
 from paths import _env
-from notes import MalformedNote, _aslist, _days_since, all_notes, parse_note
+from notes import (MalformedNote, _aslist, _days_since, _search_text_parts,
+                   all_notes, parse_note)
 
 
 # ---------- embeddings (semantic recall; aibox text-embedding-v4) ----------
@@ -121,11 +122,8 @@ def _embed_texts(texts, timeout=90):
 
 
 def _note_embed_text(meta, body):
-    parts = [str(meta.get("title", "")), str(meta.get("summary", "")),
-             " ".join(map(str, _aslist(meta.get("tags")))),
-             " ".join(map(str, _aslist(meta.get("aliases")))),
-             " ".join(map(str, _aslist(meta.get("triggers")))),
-             body[:2000]]
+    title, summary, tags, aliases, triggers = _search_text_parts(meta)
+    parts = [title, summary, tags, aliases, triggers, body[:2000]]
     return "\n".join(p for p in parts if p)
 
 

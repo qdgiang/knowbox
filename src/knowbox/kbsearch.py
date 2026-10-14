@@ -12,11 +12,12 @@ import sqlite3
 import sys
 
 import paths
-from paths import ID_RE
+from paths import ID_PREFIX_RE, ID_RE, WIKILINK_RE
 from embed import (_EDGE_RANK, EXPAND_LEVEL_CAP, EXPAND_SEARCH_PER_SEED,
                    EXPAND_SEARCH_SEEDS, EXPAND_SEARCH_TOTAL)
-from index import _freshness_report, build_db, build_index
-from notes import _aslist, all_notes
+from index import (BM25_WEIGHTS, KB_COLS, KB_TRI_COLS, _freshness_report,
+                   build_db, build_index)
+from notes import _aslist, _search_text_parts, all_notes
 
 
 def _fts_query(text):
@@ -90,7 +91,9 @@ def _fts_run(q, toks, limit, trigram_fallback=True):
 
 def _fts_exec(c, q, toks, limit, trigram_fallback=True):
     out = []
-    weights = "0.0, 0.0, 10.0, 1.0, 1.0, 5.0, 8.0, 6.0, 4.0, 1.0"  # id,path,title,typ,domain,tags,aliases,triggers,summary,body
+    # weights derive from index.KB_COLS/BM25_WEIGHTS — a column add/relayout
+    # can't silently desync weights from DDL (review finding A).
+    weights = ", ".join(str(BM25_WEIGHTS.get(cn, 0.0)) for cn in KB_COLS)
     # P10a dual tokenizer: query BOTH tables — kb (tokenchars '-_.#/':
     # path-ish tokens stay whole) and kb_d (default unicode61: compounds
     # split) — then merge by id keeping each id's BEST rank. bm25 scores are
@@ -101,10 +104,11 @@ def _fts_exec(c, q, toks, limit, trigram_fallback=True):
     for ti, table in enumerate(("kb", "kb_d")):
         try:
             rows = list(c.execute(
-                "SELECT id, path, title, snippet(%s, 9, '>>>', '<<<', '…',"
+                "SELECT id, path, title, snippet(%s, %d, '>>>', '<<<', '…',"
                 " 12), bm25(%s, %s) FROM %s WHERE %s MATCH ?"
                 " ORDER BY bm25(%s, %s) LIMIT ?"
-                % (table, table, weights, table, table, table, weights),
+                % (table, KB_COLS.index("body"), table, weights, table,
+                   table, table, weights),
                 (q, limit)))
         except sqlite3.Error:
             if ti == 0:
@@ -122,9 +126,10 @@ def _fts_exec(c, q, toks, limit, trigram_fallback=True):
         tq = " OR ".join('"%s"' % t.replace('"', '""') for t in toks if len(t) >= 3)
         if tq:
             for r in c.execute(
-                    "SELECT id, path, title, snippet(kb_tri, 3, '>>>',"
+                    "SELECT id, path, title, snippet(kb_tri, %d, '>>>',"
                     " '<<<', '…', 12), bm25(kb_tri) FROM kb_tri"
-                    " WHERE kb_tri MATCH ? ORDER BY bm25(kb_tri) LIMIT ?",
+                    " WHERE kb_tri MATCH ? ORDER BY bm25(kb_tri) LIMIT ?"
+                    % KB_TRI_COLS.index("body"),
                     (tq, limit)):
                 out.append(r)
     return out
@@ -140,12 +145,7 @@ def _vocab():
     can be corrected."""
     vocab = set()
     for _rel, meta, body in all_notes():
-        text = " ".join([
-            str(meta.get("title", "")), str(meta.get("summary", "")),
-            " ".join(map(str, _aslist(meta.get("tags")))),
-            " ".join(map(str, _aslist(meta.get("aliases")))),
-            " ".join(map(str, _aslist(meta.get("triggers")))),
-            body])
+        text = " ".join([*_search_text_parts(meta), body])
         for tok in re.findall(r"[\w'./#-]+", text.lower()):
             vocab.add(tok)
             vocab.update(p for p in re.split(r"[^a-z0-9]+", tok) if p)
@@ -237,7 +237,7 @@ def _build_graph():
     for rel, meta, body in all_notes():
         nid = str(meta.get("id") or "").strip()
         if not ID_RE.match(nid):  # id-less/mismatched file: fall back to name
-            m = re.match(r"(kb-\d{4})", os.path.basename(rel))
+            m = ID_PREFIX_RE.match(os.path.basename(rel))
             nid = m.group(1) if m else ""
         if nid:
             nodes.append((nid, rel, meta, body))
@@ -258,7 +258,7 @@ def _build_graph():
                 if t != nid:
                     _fold(o, t, chan)
                     _fold(adj[t]["in"], nid, chan)
-        for t in (set(re.findall(r"\[\[(kb-\d{4})\]\]", body)) & known) - {nid}:
+        for t in (set(WIKILINK_RE.findall(body)) & known) - {nid}:
             _fold(o, t, "mention")
             _fold(adj[t]["in"], nid, "mention")
     return adj, info

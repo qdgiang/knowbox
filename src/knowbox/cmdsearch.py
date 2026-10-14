@@ -7,8 +7,10 @@ import sys
 from datetime import datetime
 
 import paths
+from paths import ID_PREFIX_RE
 from _flags import _flags
-from embed import (EXPAND_MAX_DEPTH, FUSE_TIMEOUT, _fusion_pass, _semantic)
+from embed import (EXPAND_MAX_DEPTH, FUSE_COS_FLOOR, FUSE_TIMEOUT,
+                   _fusion_pass, _semantic)
 from kbsearch import (_build_graph, _fts_query, _print_neighborhood,
                       _print_search_expansion, _refs_grep, _typo_fix, search)
 from notes import MalformedNote, find_path, parse_note
@@ -27,6 +29,9 @@ def cmd_search(args):
     # Superseded notes are returned too (labeled) — dead knowledge stays
     # addressable by id. Unknown ids fall through to normal search (body
     # mentions can still hit).
+    # own-id short-circuit uses a deliberately LENIENT id pattern (kb-\d+,
+    # any width) — users type ids before they hit 4 digits; paths.ID_PREFIX_RE
+    # is for corpus files, not user queries.
     if len(args) == 1 and re.match(r"^kb-\d+$", args[0].lower()):
         p = find_path(args[0].lower())
         if p:
@@ -89,7 +94,7 @@ def cmd_search(args):
                 print(f"{id_}  {path}\n    {title}\n    {snip}\n")
             return
     sem = [r for r in _semantic(query, limit=3, timeout=FUSE_TIMEOUT)
-           if r[0] >= 0.40]  # rescue
+           if r[0] >= FUSE_COS_FLOOR]  # rescue
     if sem:  # calibration (kb-0024): real hits ≥0.45, noise ≤0.21
         print("(BM25 missed — semantic matches; cos <0.45 is likely-absent "
               "territory, verify before relying on these:)")
@@ -127,7 +132,7 @@ def cmd_expand(args):
     if not 1 <= depth <= EXPAND_MAX_DEPTH:
         sys.exit(f"knowbox expand: --depth must be 1 or {EXPAND_MAX_DEPTH}")
     p = find_path(target)
-    m = re.match(r"(kb-\d{4})", os.path.basename(p)) if p else None
+    m = ID_PREFIX_RE.match(os.path.basename(p)) if p else None
     if not p or not m:
         sys.exit(f"knowbox expand: no note for {target!r}")
     nid = m.group(1)

@@ -214,6 +214,16 @@ def _asstr(v):
     return "" if v is None else str(v)
 
 
+def _search_text_parts(meta):
+    """(title, summary, tags, aliases, triggers) — the note-text projection
+    shared by index.build_db, embed._note_embed_text and kbsearch._vocab.
+    Single source: add a field here, all three consumers see it."""
+    return (str(meta.get("title", "")), str(meta.get("summary", "")),
+            " ".join(map(str, _aslist(meta.get("tags")))),
+            " ".join(map(str, _aslist(meta.get("aliases")))),
+            " ".join(map(str, _aslist(meta.get("triggers")))))
+
+
 # ---------- ids ----------
 
 def next_id():
@@ -228,7 +238,7 @@ def next_id():
     lock (P7), so the allocate+write window stays atomic."""
     mx = 0
     for fn in os.listdir(paths.NOTES) if os.path.isdir(paths.NOTES) else []:
-        m = re.match(r"kb-(\d+)", fn)
+        m = re.match(r"kb-(\d+)", fn)  # any width — high-water scan, not ID_RE
         if m:
             mx = max(mx, int(m.group(1)))
     if os.path.exists(paths.LOG):
@@ -300,9 +310,7 @@ def git_commit(msg):
         # staged paths filtered to existing ones (git add fatals on an
         # unmatched pathspec); the CLI ships separately via the knowbox
         # repo, so the data repo's commits carry notes-side files only.
-        stage = [p for p in ("notes", "refs", "raw", "index.md", "log.md",
-                             "SCHEMA.md", ".gitignore", ".gitattributes",
-                             "lint-waivers.md")
+        stage = [p for p in paths.TRACKED_PATHS
                  if os.path.exists(os.path.join(paths.KB, p))]
         # encoding="utf-8" (kb-0117 B4): git stderr can carry UTF-8 paths —
         # text=True alone decodes with the locale codec (cp1252 on Windows)

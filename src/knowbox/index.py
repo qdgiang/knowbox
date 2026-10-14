@@ -10,8 +10,20 @@ import re
 import sqlite3
 
 import paths
-from notes import all_notes, _aslist
+from paths import ID_PREFIX_RE
+from notes import all_notes, _aslist, _search_text_parts
 from sysutil import _tmp_in_kb, _swap_into_place
+
+# FTS schema single-source: column order here must match every DDL/INSERT
+# below and every bm25-weight/snippet-ordinal derivation in kbsearch.
+KB_COLS = ("id", "path", "title", "typ", "domain", "tags", "aliases",
+           "triggers", "summary", "body")
+# bm25 weights by column name; id/path unlisted → 0.0. Derived string in
+# kbsearch keeps KB_COLS order: "0.0, 0.0, 10.0, 1.0, 1.0, 5.0, 8.0, 6.0,
+# 4.0, 1.0".
+BM25_WEIGHTS = {"title": 10.0, "typ": 1.0, "domain": 1.0, "tags": 5.0,
+                "aliases": 8.0, "triggers": 6.0, "summary": 4.0, "body": 1.0}
+KB_TRI_COLS = ("id", "path", "title", "body")
 
 def _note_hashes():
     """{relpath: (sha1, nbytes)} for every .md file under notes/ — ALL of
@@ -40,10 +52,10 @@ def build_db():
     try:
         c = sqlite3.connect(tmp)
         c.execute("CREATE VIRTUAL TABLE kb USING fts5(id UNINDEXED, path UNINDEXED,"
-                  " title, typ, domain, tags, aliases, triggers, summary, body,"
+                  " " + ", ".join(KB_COLS[2:]) + ","
                   " tokenize=\"unicode61 tokenchars '-_.#/'\")")
         c.execute("CREATE VIRTUAL TABLE kb_tri USING fts5(id UNINDEXED, path UNINDEXED,"
-                  " title, body, tokenize='trigram')")
+                  " " + ", ".join(KB_TRI_COLS[2:]) + ", tokenize='trigram')")
         # P10a dual tokenizer: kb_d has the SAME columns but FTS5's default
         # unicode61 (no tokenchars) — punctuation SPLITS, so path compounds
         # like `~/.claude/settings.json` index as claude/settings/json and
@@ -51,16 +63,14 @@ def build_db():
         # token; see the P10a gotcha note). Both tables are queried and
         # merged by best rank in _fts_exec.
         c.execute("CREATE VIRTUAL TABLE kb_d USING fts5(id UNINDEXED, path UNINDEXED,"
-                  " title, typ, domain, tags, aliases, triggers, summary, body)")
+                  " " + ", ".join(KB_COLS[2:]) + ")")
         for rel, meta, body in all_notes():
             if meta.get("status") == "superseded":
                 continue  # dead knowledge out of the search path
-            tags = " ".join(map(str, _aslist(meta.get("tags"))))
-            aliases = " ".join(map(str, _aslist(meta.get("aliases"))))
-            triggers = " ".join(map(str, _aslist(meta.get("triggers"))))
-            row = (str(meta.get("id", "")), rel, str(meta.get("title", "")),
+            title, summary, tags, aliases, triggers = _search_text_parts(meta)
+            row = (str(meta.get("id", "")), rel, title,
                    str(meta.get("type", "")), str(meta.get("domain", "")),
-                   tags, aliases, triggers, str(meta.get("summary", "")), body)
+                   tags, aliases, triggers, summary, body)
             c.execute("INSERT INTO kb VALUES (?,?,?,?,?,?,?,?,?,?)", row)
             c.execute("INSERT INTO kb_d VALUES (?,?,?,?,?,?,?,?,?,?)", row)
             c.execute("INSERT INTO kb_tri VALUES (?,?,?,?)",
@@ -204,10 +214,10 @@ def _freshness_report():
         return rep
     on_disk_ids = set()
     for p in disk:
-        m = re.match(r"kb-\d{4}", os.path.basename(p))
+        m = ID_PREFIX_RE.match(os.path.basename(p))
         if m:
             on_disk_ids.add(m.group(0))
-    listed = re.findall(r"^- \[(kb-\d{4}) ·", idx, re.M)
+    listed = re.findall(r"^- \[" + ID_PREFIX_RE.pattern + r" ·", idx, re.M)
     rep["orphans"] = sorted({i for i in listed if i not in on_disk_ids})
     if not rep["orphans"] and not rep["drifted"]:
         # byte-exact content check only when nothing else explains the diff

@@ -60,6 +60,15 @@ REQUIRED = ["id", "title", "type", "domain", "status", "confidence",
             "created", "updated", "summary"]
 DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 ID_RE = re.compile(r"^kb-\d{4}$")
+# id-bearing patterns, single-sourced here: note ids are 4-digit (kb-NNNN).
+# Deliberate exceptions stay local: cmdsearch query leniency (kb-\d+) and
+# notes.next_id high-water scan (kb-(\d+), any width).
+ID_PREFIX_RE = re.compile(r"(kb-\d{4})")
+WIKILINK_RE = re.compile(r"\[\[(kb-\d{4})\]\]")
+# git_commit/cmd_reindex stage list — the data repo tracks exactly these.
+TRACKED_PATHS = ("notes", "refs", "raw", "index.md", "log.md",
+                 "SCHEMA.md", ".gitignore", ".gitattributes",
+                 "lint-waivers.md")
 # janitor dead-man's switch: weekly cron touches .kb-heartbeat (kb-0014).
 # Weekly schedule + 1 day grace.
 HEARTBEAT_MAX_AGE_DAYS = 8

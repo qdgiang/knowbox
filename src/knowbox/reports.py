@@ -11,7 +11,7 @@ import paths
 from _flags import _flags
 from embed import _load_embed
 from notes import _asstr, all_notes
-from paths import ID_RE
+from paths import ID_PREFIX_RE, ID_RE
 
 
 def cmd_refs(args):
@@ -128,7 +128,7 @@ def cmd_churn(args):
         changed line is a date bump (or there were no content lines)."""
         if state["file"] is not None and state["lines"] and \
                 any(not DATE_ONLY.match(l) for l in state["lines"]):
-            m = re.search(r"kb-\d{4}", state["file"])
+            m = ID_PREFIX_RE.search(state["file"])
             key = m.group(0) if m else state["file"]
             counts[key] = counts.get(key, 0) + 1
             days_touched.setdefault(key, set()).add(state["day"])

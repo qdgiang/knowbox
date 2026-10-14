@@ -13,8 +13,8 @@ from _flags import _flags
 from index import _freshness_report, build_db, build_index
 from notes import (PARSE_FAILURES, _aslist, _asstr, _days_since, all_notes,
                    append_log, git_commit, next_id)
-from paths import (DATE_RE, ENUMS, HEARTBEAT_MAX_AGE_DAYS, ID_RE, REQUIRED,
-                   _env)
+from paths import (DATE_RE, ENUMS, HEARTBEAT_MAX_AGE_DAYS, ID_PREFIX_RE,
+                   ID_RE, REQUIRED, WIKILINK_RE, _env)
 from sysutil import IS_NT, _atomic_write_bytes, _locked
 
 
@@ -27,7 +27,7 @@ from sysutil import IS_NT, _atomic_write_bytes, _locked
 # that suppresses nothing is itself a WARN, so the file self-cleans.
 WAIVER_CATEGORIES = {"created-vs-log"}
 WAIVER_RE = re.compile(
-    r"^(kb-\d{4})\s+([a-z-]+)\s+(\d{4}-\d{2}-\d{2})\s+(\S.*)$")
+    r"^" + ID_PREFIX_RE.pattern + r"\s+([a-z-]+)\s+(\d{4}-\d{2}-\d{2})\s+(\S.*)$")
 
 
 def _load_waivers():
@@ -60,7 +60,7 @@ def _load_waivers():
                 malformed.append(f"unknown category {cat!r} in line "
                                  f"'{s}' (waivable: "
                                  f"{', '.join(sorted(WAIVER_CATEGORIES))})")
-        elif re.match(r"^kb-\d{4}(\s|$)", s):
+        elif re.match(r"^" + ID_PREFIX_RE.pattern + r"(\s|$)", s):
             malformed.append(f"line '{s}' is not "
                              "`kb-XXXX <category> <date> <reason>`")
     return waivers, malformed
@@ -250,7 +250,7 @@ def cmd_lint(_args):
         dm = re.search(r"^## \[(\d{4}-\d{2}-\d{2})\]", log_text, re.M)
         first_log_date = dm.group(1) if dm else None
         for m in re.finditer(
-                r"^## \[(\d{4}-\d{2}-\d{2})\] create \| (kb-\d{4})",
+                r"^## \[(\d{4}-\d{2}-\d{2})\] create \| " + ID_PREFIX_RE.pattern,
                 log_text, re.M):
             log_creates.setdefault(m.group(2), []).append(m.group(1))
     n_parsed = 0
@@ -296,7 +296,7 @@ def cmd_lint(_args):
             errs.append(f"{rel}: {words} words (>600; split it)")
         elif words > 450 and meta.get("type") != "reference":
             warns.append(f"{rel}: {words} words (budget is 400)")
-        body_links = set(re.findall(r"\[\[(kb-\d{4})\]\]", body))
+        body_links = set(WIKILINK_RE.findall(body))
         related = {str(r) for r in _aslist(meta.get("related"))}
         for l in sorted(body_links - related):
             warns.append(f"{rel}: body links [[{l}]] but it is not in related:")

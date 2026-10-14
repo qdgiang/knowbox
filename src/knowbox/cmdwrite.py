@@ -212,8 +212,7 @@ def cmd_reindex(_args):
                 new_index = f.read()
         except OSError:
             pass
-        staged = ("notes", "refs", "raw", "index.md", "log.md", "SCHEMA.md",
-                  ".gitignore", ".gitattributes", "lint-waivers.md")
+        staged = paths.TRACKED_PATHS
         # B5 (kb-0117): git missing → clean message, and a FAILED status must
         # count as dirty — the old unchecked rc read a non-git tree as clean
         # and silently skipped the commit

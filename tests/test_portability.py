@@ -112,8 +112,9 @@ def test_fence_editor_and_heartbeat_gates():
 
 def test_fence_gitattributes_shipped_by_git_commit():
     # the new repo file must ride the auto-commit path list, or it never ships.
-    # Owner: notes.py (git_commit moved there in the split).
-    assert '".gitattributes"' in (CLI_SRC.parent / "notes.py") \
+    # Owner: paths.py TRACKED_PATHS (single source since the Batch-2
+    # consolidation; git_commit stages it verbatim).
+    assert '".gitattributes"' in (CLI_SRC.parent / "paths.py") \
         .read_text(encoding="utf-8")
 
 
