@@ -22,7 +22,7 @@ def _fake_home_env(home):
     env.update({"HOME": str(home),
                 "UV_PYTHON_INSTALL_DIR": UV_PY_DIR,
                 "UV_CACHE_DIR": UV_CACHE,
-                "ANTHROPIC_AUTH_TOKEN": "test-token",
+                "KNOWBOX_API_KEY": "test-token",
                 "KNOWBOX_EMBED_URL": "http://127.0.0.1:9/embeddings"})
     return env
 

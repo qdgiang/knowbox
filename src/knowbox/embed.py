@@ -13,9 +13,9 @@ from notes import (MalformedNote, _aslist, _days_since, _search_text_parts,
                    all_notes, parse_note)
 
 
-# ---------- embeddings (semantic recall; aibox text-embedding-v4) ----------
+# ---------- embeddings (semantic recall; AI-provider text-embedding-v4) ----
 
-EMBED_URL = _env("EMBED_URL") or "https://api.ai-box.vn/v1/embeddings"
+EMBED_URL = _env("EMBED_URL")   # required for embed ops — no vendor default
 EMBED_MODEL = _env("EMBED_MODEL") or "text-embedding-v4"
 
 # Gated RRF fusion (kb-0107 survey gap #1; fixed k=60 — adaptive weighting
@@ -74,16 +74,7 @@ _EDGE_RANK = {"supersedes": 0, "related": 1, "mention": 2}  # fold precedence
 
 
 def _embed_token():
-    tok = os.environ.get("ANTHROPIC_AUTH_TOKEN") or \
-          os.environ.get("ANTHROPIC_API_KEY")
-    if tok:
-        return tok
-    try:  # same aibox token Claude Code uses (settings.json env block)
-        with open(os.path.expanduser("~/.claude/settings.json"),
-                  encoding="utf-8") as f:
-            return json.load(f).get("env", {}).get("ANTHROPIC_AUTH_TOKEN", "")
-    except (OSError, ValueError):
-        return ""
+    return os.environ.get("KNOWBOX_API_KEY", "").strip()
 
 
 def _embed_call(payload, tok, timeout=90):
@@ -101,10 +92,11 @@ def _embed_call(payload, tok, timeout=90):
 
 
 def _embed_texts(texts, timeout=90):
+    if not EMBED_URL:
+        raise RuntimeError("no embeddings endpoint (set KNOWBOX_EMBED_URL)")
     tok = _embed_token()
     if not tok:
-        raise RuntimeError("no auth token (set ANTHROPIC_AUTH_TOKEN or use the "
-                           "aibox profile)")
+        raise RuntimeError("no auth token (set KNOWBOX_API_KEY)")
     try:  # batch first
         data = _embed_call({"model": EMBED_MODEL, "input": texts}, tok,
                            timeout=timeout)

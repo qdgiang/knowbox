@@ -41,9 +41,9 @@ the uv tools venv, not in your KB.
 | Variable | Default | Purpose |
 |---|---|---|
 | `KNOWBOX_ROOT` | `~/knowbox` | KB data root |
-| `KNOWBOX_EMBED_URL` | `https://api.ai-box.vn/v1/embeddings` | embeddings endpoint |
+| `KNOWBOX_EMBED_URL` | — | embeddings endpoint (required for embed ops) |
 | `KNOWBOX_EMBED_MODEL` | `text-embedding-v4` | embedding model |
-| `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_API_KEY` | — | embed token (fallback: `env.ANTHROPIC_AUTH_TOKEN` in `~/.claude/settings.json`) |
+| `KNOWBOX_API_KEY` | — | embed token (required for embed/vsearch/fusion) |
 | `KNOWBOX_LOCK_TIMEOUT` | built-in | write-lock wait |
 | `KNOWBOX_NO_FUSION` / `KNOWBOX_NO_RECENCY` | — | search kill-switches |
 | `KNOWBOX_NO_HEARTBEAT` | — | exempt replica machines from the janitor-heartbeat lint |

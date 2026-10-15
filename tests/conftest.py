@@ -7,9 +7,9 @@ Design notes:
 - Production safety: kb_run() refuses to target /home/giang/kb. Every sandbox
   is built under pytest's tmp dirs.
 - HOME is deliberately NOT faked: uv discovers its managed CPython 3.12 under
-  the real HOME, and _embed_token() short-circuits on ANTHROPIC_AUTH_TOKEN
-  before ever reading ~/.claude/settings.json. Isolation comes from
-  KNOWBOX_ROOT + the blackholed KNOWBOX_EMBED_URL, not from HOME.
+  the real HOME, and _embed_token() reads only KNOWBOX_API_KEY (no
+  settings.json fallback), so the real HOME leaks nothing. Isolation comes
+  from KNOWBOX_ROOT + the blackholed KNOWBOX_EMBED_URL, not from HOME.
   (Fake-HOME fallback tests live in test_resolution.py and fake HOME
   explicitly, pinning UV_PYTHON_INSTALL_DIR.)
 - Goldens: compare against tests/goldens/*; regenerate ONLY via
@@ -50,7 +50,7 @@ GIT_ENV_EXTRA = {
 def _cli_env(root):
     env = {**os.environ, **GIT_ENV_EXTRA,
            "KNOWBOX_ROOT": str(root),
-           "ANTHROPIC_AUTH_TOKEN": "test-token",     # short-circuits settings.json read
+           "KNOWBOX_API_KEY": "test-token",        # the only token source
            "KNOWBOX_EMBED_URL": "http://127.0.0.1:9/embeddings"}  # blackhole
     env.pop("KB_ROOT", None)       # removed at 2.0 — must never leak in
     env.pop("KB_EMBED_URL", None)  # legacy spelling — dropped at 2.0

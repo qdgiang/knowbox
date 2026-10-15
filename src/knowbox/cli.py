@@ -47,8 +47,7 @@ Commands:
 Environment: KNOWBOX_ROOT (KB dir; default ~/knowbox), KNOWBOX_LOCK_TIMEOUT,
   KNOWBOX_EMBED_URL, KNOWBOX_EMBED_MODEL, KNOWBOX_NO_FUSION,
   KNOWBOX_NO_RECENCY, KNOWBOX_NO_HEARTBEAT.
-  ANTHROPIC_AUTH_TOKEN (or the ai-box token in ~/.claude/settings.json)
-  authorizes embed/vsearch/fusion calls.
+  KNOWBOX_API_KEY authorizes embed/vsearch/fusion calls.
 """
 import os
 import sys
