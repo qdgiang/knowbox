@@ -77,12 +77,11 @@ The server notes must not be fetchable from this machine.
 
 ## 7. Optional: semantic search (embed/vsearch/fusion)
 
-Uses the same ai-box endpoint as the server; auth is the token from
-`%USERPROFILE%\.claude\settings.json` (`env.ANTHROPIC_AUTH_TOKEN`) — free if
-Claude Code is installed — or:
+Point the CLI at your AI provider's embeddings endpoint and set its token:
 
 ```powershell
-setx ANTHROPIC_AUTH_TOKEN <token>   # new terminal
+setx KNOWBOX_EMBED_URL <endpoint>   # e.g. https://<provider>/v1/embeddings
+setx KNOWBOX_API_KEY <token>        # new terminal
 knowbox embed
 ```
 
