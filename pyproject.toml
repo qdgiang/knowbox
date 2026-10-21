@@ -1,0 +1,20 @@
+[project]
+name = "knowbox"
+version = "4.0.0"
+description = "knowbox — personal/agent knowledge-base CLI: markdown-as-truth notes, hybrid BM25 + gated semantic search, git-versioned. Stdlib only."
+readme = "README.md"
+requires-python = ">=3.12,<3.14"
+dependencies = []
+
+[project.scripts]
+knowbox = "knowbox.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.9,<1"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = ["pytest==9.1.1"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

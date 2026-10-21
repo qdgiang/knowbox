@@ -1,0 +1,3 @@
+# knowbox — LF everywhere (kb-0117 D9 / kb-0118): the CLI writes LF files on
+# every platform and tests pin this; CRLF leakage breaks goldens + note parsing.
+* text=auto eol=lf
