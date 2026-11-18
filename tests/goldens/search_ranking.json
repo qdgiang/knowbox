@@ -1,0 +1,69 @@
+{
+  "sqlite wal mode journal": [
+    "kb-0001",
+    "kb-0052",
+    "kb-0014",
+    "kb-0051",
+    "kb-0040",
+    "kb-0075"
+  ],
+  "pytest fixture scope": [
+    "kb-0006",
+    "kb-0028"
+  ],
+  "docker layer cache": [
+    "kb-0018"
+  ],
+  "consoleblank": [
+    "kb-0016"
+  ],
+  "tty_tickets": [
+    "kb-0015"
+  ],
+  "usr local bin": [
+    "kb-0013",
+    "kb-0036"
+  ],
+  "widget-factory project": [
+    "kb-0032",
+    "kb-0074"
+  ],
+  "FTS5 bm25 index": [
+    "kb-0002",
+    "kb-0003",
+    "kb-0023",
+    "kb-0030",
+    "kb-0069",
+    "kb-0031"
+  ],
+  "nginx reverse proxy routing": [
+    "kb-0021"
+  ],
+  "docker group root equivalent": [
+    "kb-0017"
+  ],
+  "logind lid close suspend": [
+    "kb-0012"
+  ],
+  "dnf package install policy": [
+    "kb-0036"
+  ],
+  "tmux detach session": [
+    "kb-0037"
+  ],
+  "staged proposal promotion": [
+    "kb-0033"
+  ],
+  "settings.json": [
+    "kb-0025",
+    "kb-0039",
+    "kb-0040"
+  ],
+  "kb-0042": [
+    "kb-0042"
+  ],
+  "consoleblankk": [
+    "kb-0016"
+  ],
+  "zzq-nonexistent-token qwxvb": []
+}

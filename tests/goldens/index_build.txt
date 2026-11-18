@@ -1,0 +1,161 @@
+# KB Index
+
+> Personal knowledge base. **Read this file first, then open only the
+> note(s) you need.** Conventions: SCHEMA.md. CLI: `knowbox search/show/new`.
+> Entries: `- [id · title](path): summary`. Generated — do not edit by hand.
+
+**85 notes** · domains: [claude-code](#claude-code), [docker](#docker), [docs](#docs), [git](#git), [http](#http), [kb](#kb), [linux](#linux), [markdown](#markdown), [nginx](#nginx), [project](#project), [python](#python), [regex](#regex), [search](#search), [sqlite](#sqlite), [ssh](#ssh), [terminal](#terminal), [testing](#testing), [yaml](#yaml)
+
+## claude-code
+
+- [kb-0039 · Claude Code reads settings from ~/.claude/settings.json then project files](notes/kb-0039-settings-json-locations.md): Claude Code reads settings from ~/.claude/settings.json then project files
+- [kb-0040 · Hooks fire on tool events deterministically, unlike instructions](notes/kb-0040-hooks-are-deterministic.md): Hooks fire on tool events deterministically, unlike instructions
+
+## docker
+
+- [kb-0017 · The docker group is root-equivalent on the host](notes/kb-0017-docker-group-root-equivalent.md): The docker group is root-equivalent on the host
+- [kb-0018 · Docker layer cache invalidates at the first changed instruction](notes/kb-0018-docker-layer-cache.md): Docker layer cache invalidates at the first changed instruction
+- [kb-0019 · Compose prefixes every resource with the project name](notes/kb-0019-compose-project-name.md): Compose prefixes every resource with the project name
+- [kb-0020 · The latest tag is a moving pointer, not a version](notes/kb-0020-latest-tag-moves.md): The latest tag is a moving pointer, not a version
+- [kb-0050 · Multi-stage builds keep build tools out of the runtime image](notes/kb-0050-docker-multi-stage-builds.md): Multi-stage builds keep build tools out of the runtime image
+- [kb-0067 · Fixture: note without triggers (lint warn)](notes/kb-0067-no-triggers-one.md): Fixture: note without triggers (lint warn)
+
+## docs
+
+- [kb-0029 · Large reference docs get a section-map companion note](notes/kb-0029-section-map-notes.md): Large reference docs get a section-map companion note
+- [kb-0030 · A small always-readable index beats searching blind](notes/kb-0030-index-first-routing.md): A small always-readable index beats searching blind
+- [kb-0031 · Index summary lines over ~220 characters get truncated by readers](notes/kb-0031-summary-line-length.md): Index summary lines over ~220 characters get truncated by readers
+
+## git
+
+- [kb-0008 · git rebase --onto moves a branch stack without replaying everything](notes/kb-0008-rebase-onto.md): git rebase --onto moves a branch stack without replaying everything
+- [kb-0009 · git push --force-with-lease refuses to overwrite unseen commits](notes/kb-0009-force-with-lease.md): git push --force-with-lease refuses to overwrite unseen commits
+- [kb-0010 · A detached HEAD is a normal state, not data loss](notes/kb-0010-detached-head-is-fine.md): A detached HEAD is a normal state, not data loss
+- [kb-0011 · git bisect run automates the search for a breaking commit](notes/kb-0011-bisect-run.md): git bisect run automates the search for a breaking commit
+- [kb-0048 · git worktree checks out a second branch in a second directory](notes/kb-0048-worktree-parallel-branches.md): git worktree checks out a second branch in a second directory
+- [kb-0054 · git rerere records conflict resolutions and replays them](notes/kb-0054-git-rerere.md): git rerere records conflict resolutions and replays them
+- [kb-0061 · Git internals deep-dive (deliberately oversized fixture note)](notes/kb-0061-git-internals-oversized.md): Git internals deep-dive (deliberately oversized fixture note)
+- [kb-0066 · Fixture: second verified-without-date note (lint error)](notes/kb-0066-verified-no-date-two.md): Fixture: second verified-without-date note (lint error)
+
+## http
+
+- [kb-0041 · Cache-Control beats Expires when both are present](notes/kb-0041-http-cache-headers.md): Cache-Control beats Expires when both are present
+- [kb-0056 · 429 responses carry Retry-After — honor it](notes/kb-0056-http-429-retry-after.md): 429 responses carry Retry-After — honor it
+- [kb-0071 · Idempotency keys make retried POSTs safe](notes/kb-0071-idempotency-keys.md): Idempotency keys make retried POSTs safe
+
+## kb
+
+- [kb-0033 · Staged proposals are promoted to notes by review, not by accident](notes/kb-0033-staged-proposal-promotion.md): Staged proposals are promoted to notes by review, not by accident
+- [kb-0034 · Supersede wrong facts instead of deleting them](notes/kb-0034-supersede-dont-delete.md): Supersede wrong facts instead of deleting them
+- [kb-0035 · Search before creating — most new facts belong in an existing note](notes/kb-0035-write-time-gate.md): Search before creating — most new facts belong in an existing note
+- [kb-0063 · A verified stamp records when a claim was last confirmed](notes/kb-0063-verified-stamp-meaning.md): A verified stamp records when a claim was last confirmed
+- [kb-0064 · Conflicting notes resolve by status, then recency, then provenance](notes/kb-0064-conflict-precedence.md): Conflicting notes resolve by status, then recency, then provenance
+- [kb-0069 · Fixture: note whose summary exceeds the index-line budget](notes/kb-0069-long-summary-note.md): Fixture: note whose summary exceeds the index-line budget — padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding
+- [kb-0075 · sqlite internals guide: section map](notes/kb-0075-sqlite-internals-guide-section-map.md): Section map for refs/sqlite-internals-guide.md — synthetic fixture.
+- [kb-0076 · pytest cookbook: section map](notes/kb-0076-pytest-cookbook-section-map.md): Section map for refs/pytest-cookbook.md — synthetic fixture.
+- [kb-0077 · docker networking notes: section map](notes/kb-0077-docker-networking-notes-section-map.md): Section map for refs/docker-networking-notes.md — synthetic fixture.
+- [kb-0078 · git workflows guide: section map](notes/kb-0078-git-workflows-guide-section-map.md): Section map for refs/git-workflows-guide.md — synthetic fixture.
+- [kb-0079 · http caching survey: section map](notes/kb-0079-http-caching-survey-section-map.md): Section map for refs/http-caching-survey.md — synthetic fixture.
+- [kb-0080 · linux permissions cheatsheet: section map](notes/kb-0080-linux-permissions-cheatsheet-section-map.md): Section map for refs/linux-permissions-cheatsheet.md — synthetic fixture.
+- [kb-0081 · regex field guide: section map](notes/kb-0081-regex-field-guide-section-map.md): Section map for refs/regex-field-guide.md — synthetic fixture.
+- [kb-0082 · markdown renderer notes: section map](notes/kb-0082-markdown-renderer-notes-section-map.md): Section map for refs/markdown-renderer-notes.md — synthetic fixture.
+- [kb-0083 · search ranking survey: section map](notes/kb-0083-search-ranking-survey-section-map.md): Section map for refs/search-ranking-survey.md — synthetic fixture.
+- [kb-0084 · terminal emulation notes: section map](notes/kb-0084-terminal-emulation-notes-section-map.md): Section map for refs/terminal-emulation-notes.md — synthetic fixture.
+- [kb-0085 · yaml pitfalls guide: section map](notes/kb-0085-yaml-pitfalls-guide-section-map.md): Section map for refs/yaml-pitfalls-guide.md — synthetic fixture.
+- [kb-0086 · ssh config guide: section map](notes/kb-0086-ssh-config-guide-section-map.md): Section map for refs/ssh-config-guide.md — synthetic fixture.
+
+## linux
+
+- [kb-0012 · logind suspends on lid close unless HandleLidSwitch is changed](notes/kb-0012-logind-lid-close-sleep.md): logind suspends on lid close unless HandleLidSwitch is changed
+- [kb-0013 · /usr/local/bin precedes /usr/bin in the default PATH](notes/kb-0013-usr-local-bin-path-order.md): /usr/local/bin precedes /usr/bin in the default PATH
+- [kb-0014 · journalctl is volatile until Storage=persistent is set](notes/kb-0014-journalctl-persistent.md): journalctl is volatile until Storage=persistent is set
+- [kb-0015 · sudo tty_tickets confines the sudo grace period to one terminal](notes/kb-0015-sudo-tty-tickets.md): sudo tty_tickets confines the sudo grace period to one terminal
+- [kb-0016 · consoleblank blanks the virtual console after N seconds](notes/kb-0016-consoleblank-kernel-param.md): consoleblank blanks the virtual console after N seconds
+- [kb-0036 · Prefer the distribution package manager for system installs](notes/kb-0036-dnf-install-policy.md): Prefer the distribution package manager for system installs
+- [kb-0049 · oom_score_adj biases which process the OOM killer picks](notes/kb-0049-oom-score-adj.md): oom_score_adj biases which process the OOM killer picks
+- [kb-0053 · inotify watch limits break file watchers on big trees](notes/kb-0053-inotify-limits.md): inotify watch limits break file watchers on big trees
+- [kb-0062 · Linux boot process deep-dive (deliberately oversized fixture note)](notes/kb-0062-linux-boot-oversized.md): Linux boot process deep-dive (deliberately oversized fixture note)
+- [kb-0068 · Fixture: second note without triggers (lint warn)](notes/kb-0068-no-triggers-two.md): Fixture: second note without triggers (lint warn)
+
+## markdown
+
+- [kb-0046 · Headings inside code fences are not headings](notes/kb-0046-markdown-heading-in-code-fence.md): Headings inside code fences are not headings
+- [kb-0072 · Pipes inside markdown table cells need escaping](notes/kb-0072-markdown-table-escaping.md): Pipes inside markdown table cells need escaping
+
+## nginx
+
+- [kb-0021 · nginx location blocks route by longest prefix match](notes/kb-0021-nginx-reverse-proxy-routing.md): nginx location blocks route by longest prefix match
+- [kb-0022 · Reverse proxies must forward Host and X-Forwarded-* headers](notes/kb-0022-nginx-proxy-headers.md): Reverse proxies must forward Host and X-Forwarded-* headers
+
+## project
+
+- [kb-0032 · widget-factory project: a synthetic example project for fixtures](notes/kb-0032-widget-factory-project.md): widget-factory project: a synthetic example project for fixtures
+
+## python
+
+- [kb-0004 · Create the virtualenv before installing anything into it](notes/kb-0004-venv-before-install.md): Create the virtualenv before installing anything into it
+- [kb-0005 · Python default arguments are evaluated once at def time](notes/kb-0005-mutable-default-argument.md): Python default arguments are evaluated once at def time
+- [kb-0006 · pytest fixture scope decides how often setup runs](notes/kb-0006-pytest-fixture-scopes.md): pytest fixture scope decides how often setup runs
+- [kb-0007 · C extensions can release the GIL; pure Python cannot](notes/kb-0007-gil-release-c-extensions.md): C extensions can release the GIL; pure Python cannot
+- [kb-0047 · Stale __pycache__ rarely bites, but zip-safe eggs and mounts change mtime](notes/kb-0047-pycache-stale-bytecode.md): Stale __pycache__ rarely bites, but zip-safe eggs and mounts change mtime
+- [kb-0051 · The walrus operator binds in comprehensions without leaking the loop var](notes/kb-0051-walrus-operator-scope.md): The walrus operator binds in comprehensions without leaking the loop var
+- [kb-0065 · Fixture: verified status without a verified date (lint error)](notes/kb-0065-verified-no-date-one.md): Fixture: verified status without a verified date (lint error)
+
+## regex
+
+- [kb-0043 · Nested quantifiers cause catastrophic regex backtracking](notes/kb-0043-regex-catastrophic-backtracking.md): Nested quantifiers cause catastrophic regex backtracking
+- [kb-0058 · \b matches between word and non-word characters](notes/kb-0058-regex-word-boundary.md): \b matches between word and non-word characters
+
+## search
+
+- [kb-0023 · BM25 saturates term frequency — repetition stops helping](notes/kb-0023-bm25-saturation.md): BM25 saturates term frequency — repetition stops helping
+- [kb-0024 · Reciprocal rank fusion merges rankings with 1/(k+rank)](notes/kb-0024-reciprocal-rank-fusion.md): Reciprocal rank fusion merges rankings with 1/(k+rank)
+- [kb-0025 · A tokenizer that glues paths makes path-part queries miss](notes/kb-0025-tokenizer-compound-tokens.md): A tokenizer that glues paths makes path-part queries miss
+- [kb-0070 · Typo correction fires only on a unique edit-distance-1 candidate](notes/kb-0070-typo-correction-unique-only.md): Typo correction fires only on a unique edit-distance-1 candidate
+
+## sqlite
+
+- [kb-0001 · SQLite WAL mode keeps readers unblocked during writes](notes/kb-0001-wal-mode-journal.md): SQLite WAL mode keeps readers unblocked during writes
+- [kb-0002 · FTS5 bm25() returns negative scores — more negative is better](notes/kb-0002-fts5-bm25-ranking.md): FTS5 bm25() returns negative scores — more negative is better
+- [kb-0003 · FTS5 external-content tables must be rebuilt after bulk changes](notes/kb-0003-fts5-external-content.md): FTS5 external-content tables must be rebuilt after bulk changes
+- [kb-0052 · SQLITE_BUSY needs a busy_timeout, not retries](notes/kb-0052-sqlite-busy-timeout.md): SQLITE_BUSY needs a busy_timeout, not retries
+- [kb-0060 · SQLite deep-dive (deliberately oversized fixture note)](notes/kb-0060-sqlite-deep-dive-oversized.md): SQLite deep-dive (deliberately oversized fixture note)
+
+## ssh
+
+- [kb-0044 · ssh config Host blocks apply first-match-wins per option](notes/kb-0044-ssh-config-host-blocks.md): ssh config Host blocks apply first-match-wins per option
+- [kb-0045 · Agent forwarding exposes your keys to the remote host's root](notes/kb-0045-ssh-agent-forwarding-risk.md): Agent forwarding exposes your keys to the remote host's root
+- [kb-0059 · CHANGED host key means rebuild or MITM — verify out of band](notes/kb-0059-ssh-known-hosts-changed.md): CHANGED host key means rebuild or MITM — verify out of band
+
+## terminal
+
+- [kb-0037 · tmux detach keeps the session alive server-side](notes/kb-0037-tmux-detach-session.md): tmux detach keeps the session alive server-side
+- [kb-0038 · tmux clipboard needs OSC52 or set-clipboard for remote copies](notes/kb-0038-tmux-clipboard-osc52.md): tmux clipboard needs OSC52 or set-clipboard for remote copies
+- [kb-0073 · Truecolor terminals advertise via COLORTERM=truecolor](notes/kb-0073-terminal-truecolor.md): Truecolor terminals advertise via COLORTERM=truecolor
+
+## testing
+
+- [kb-0026 · Golden tests pin outputs byte-for-byte and regenerate explicitly](notes/kb-0026-golden-master-testing.md): Golden tests pin outputs byte-for-byte and regenerate explicitly
+- [kb-0027 · Build throwaway sandboxes for CLI tests, never touch production data](notes/kb-0027-sandbox-fixtures.md): Build throwaway sandboxes for CLI tests, never touch production data
+- [kb-0028 · Mutating a session-scoped fixture leaks state between tests](notes/kb-0028-session-scoped-mutation.md): Mutating a session-scoped fixture leaks state between tests
+- [kb-0055 · Fixture dates must be absolute and fixed](notes/kb-0055-deterministic-dates-in-fixtures.md): Fixture dates must be absolute and fixed
+
+## yaml
+
+- [kb-0042 · YAML 1.1 parses bare no as boolean false — the Norway problem](notes/kb-0042-yaml-norway-problem.md): YAML 1.1 parses bare no as boolean false — the Norway problem
+- [kb-0057 · YAML anchors and merge keys deduplicate mappings](notes/kb-0057-yaml-anchors-merge.md): YAML anchors and merge keys deduplicate mappings
+
+## refs/ — large docs (read via their section-map note)
+
+- `refs/docker-networking-notes.md`
+- `refs/git-workflows-guide.md`
+- `refs/http-caching-survey.md`
+- `refs/linux-permissions-cheatsheet.md`
+- `refs/markdown-renderer-notes.md`
+- `refs/pytest-cookbook.md`
+- `refs/regex-field-guide.md`
+- `refs/search-ranking-survey.md`
+- `refs/sqlite-internals-guide.md`
+- `refs/ssh-config-guide.md`
+- `refs/terminal-emulation-notes.md`
+- `refs/yaml-pitfalls-guide.md`

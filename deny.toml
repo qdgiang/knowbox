@@ -1,0 +1,24 @@
+# cargo-deny 0.19 config (kb-0275 refs file, section 5.2).
+[advisories]
+yanked = "deny"
+unsound = "all"
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+allow-wildcard-paths = true
+
+[bans.build]
+executables = "deny" # precompiled blobs inside compile-time crates
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+
+[licenses]
+allow = ["MIT", "Apache-2.0", "Apache-2.0 WITH LLVM-exception", "BSD-2-Clause", "BSD-3-Clause", "ISC", "Unicode-3.0", "Zlib",
+  "CDLA-Permissive-2.0"] # webpki-root-certs (Mozilla's CA list), pulled in by reqwest and rustls
+unused-allowed-license = "allow" # the list covers common crates; most repos use only some of them
+
+[licenses.private]
+ignore = true # this repo's own crates have publish = false and no licence

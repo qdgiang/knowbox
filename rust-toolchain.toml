@@ -1,0 +1,6 @@
+# Pins this repo's Rust version; rustup downloads it on first use (kb-0280).
+# Bump channel deliberately, then rebuild the rust skill's references.
+[toolchain]
+channel = "1.100.0"
+profile = "minimal"
+components = ["clippy", "rustfmt", "rust-analyzer", "rust-src"]

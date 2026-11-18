@@ -1,0 +1,17 @@
+{
+  "errors": [
+    "ERROR notes/kb-0060-sqlite-deep-dive-oversized.md: 11166 words (>600; split it)",
+    "ERROR notes/kb-0061-git-internals-oversized.md: 11167 words (>600; split it)",
+    "ERROR notes/kb-0062-linux-boot-oversized.md: 11168 words (>600; split it)",
+    "ERROR notes/kb-0065-verified-no-date-one.md: status: verified but no verified: date",
+    "ERROR notes/kb-0066-verified-no-date-two.md: status: verified but no verified: date"
+  ],
+  "warnings": [
+    "WARN  notes/kb-0067-no-triggers-one.md: missing triggers: (WHEN should an agent read this?)",
+    "WARN  notes/kb-0068-no-triggers-two.md: missing triggers: (WHEN should an agent read this?)",
+    "WARN  notes/kb-0069-long-summary-note.md: summary 299 chars (>220; it is the index line)"
+  ],
+  "summary": [
+    "5 errors, 3 warnings across 86 notes"
+  ]
+}

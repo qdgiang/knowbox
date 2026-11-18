@@ -1,0 +1,5 @@
+# clippy config (kb-0275 refs file, section 5.1).
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+# House rules as compiler errors, e.g. { path = "std::process::Command::output", reason = "...", replacement = "..." }
+disallowed-methods = []
