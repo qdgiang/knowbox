@@ -1836,6 +1836,8 @@ fn structured_reads_are_repeatable_and_leave_the_kb_untouched() -> io::Result<()
     }
     let usage = run(&sandbox, &root, &["usage", "--no-write"])?;
     assert_success(&usage, "read usage without a rollup");
+    // On Windows the lock also blocks the test's snapshot read of .kb.lock.
+    drop(lock);
     assert_eq!(file_snapshot(&root)?, before);
     Ok(())
 }
@@ -2431,18 +2433,20 @@ impl Drop for RedirectGuard {
 fn redirect_directory(root: &Path, name: &str, external: &Path) -> io::Result<RedirectGuard> {
     #[cfg(windows)]
     {
-        use std::os::windows::process::CommandExt as _;
-
         let system_root = std::env::var_os("SystemRoot")
             .ok_or_else(|| io::Error::other("Windows SystemRoot is missing"))?;
-        // cmd.exe does not use standard argv quoting; inject the target with one expansion.
-        let output = Command::new(PathBuf::from(system_root).join("System32/cmd.exe"))
-            .current_dir(root)
-            .env("KB_TEST_JUNCTION_NAME", name)
+        let powershell =
+            PathBuf::from(system_root).join(r"System32\WindowsPowerShell\v1.0\powershell.exe");
+        let output = Command::new(powershell)
+            .env("KB_TEST_JUNCTION_PATH", root.join(name))
             .env("KB_TEST_JUNCTION_TARGET", external)
             .stdin(Stdio::null())
-            .args(["/D", "/V:OFF", "/C"])
-            .raw_arg(r#"mklink /J "%KB_TEST_JUNCTION_NAME%" "%KB_TEST_JUNCTION_TARGET%""#)
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "$null = New-Item -ItemType Junction -Path $env:KB_TEST_JUNCTION_PATH -Value $env:KB_TEST_JUNCTION_TARGET -ErrorAction Stop",
+            ])
             .output()?;
         assert_success(&output, "create test junction");
     }
