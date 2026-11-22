@@ -3,6 +3,7 @@ name: Release
 on:
   workflow_dispatch:
   push:
+    branches: ['codex/knowbox-1.4-package-review']
     tags: ['v[0-9]+.[0-9]+']
 
 permissions:
