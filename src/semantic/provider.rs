@@ -8,6 +8,7 @@ use serde::de::{Error as _, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
 use thiserror::Error;
 use ureq::http::{HeaderValue, Uri};
+use ureq::{Proxy, ProxyProtocol};
 
 const MAX_BATCH: usize = 16;
 const MAX_DIM: usize = 16_384;
@@ -27,6 +28,8 @@ pub(super) enum ProviderError {
     NoToken,
     #[error("invalid KNOWBOX_API_KEY")]
     InvalidToken,
+    #[error("invalid embedding proxy configuration (check HTTPS_PROXY and NO_PROXY)")]
+    InvalidProxy,
     #[error("embedding request timed out")]
     Timeout,
     #[error("embedding request failed")]
@@ -77,6 +80,54 @@ fn endpoint(value: &str) -> Result<Uri, ProviderError> {
     }
 }
 
+fn embedding_proxy(uri: &Uri) -> Result<Option<Proxy>, ProviderError> {
+    if uri.scheme_str() != Some("https") {
+        return Ok(None);
+    }
+    let Some(value) = env::var_os("HTTPS_PROXY").or_else(|| env::var_os("https_proxy")) else {
+        return Ok(None);
+    };
+    if value.to_str().is_some_and(|value| value.trim().is_empty()) {
+        return Ok(None);
+    }
+    if let Some(bypass) = env::var_os("NO_PROXY").or_else(|| env::var_os("no_proxy")) {
+        let bypass = bypass
+            .into_string()
+            .map_err(|_| ProviderError::InvalidProxy)?;
+        // Use ureq's pattern matcher without configuring a connection to this proxy.
+        let mut rules = Proxy::builder(ProxyProtocol::Http);
+        for host in bypass
+            .split(',')
+            .map(str::trim)
+            .filter(|host| !host.is_empty())
+        {
+            rules = rules.no_proxy(host);
+        }
+        if rules
+            .build()
+            .map_err(|_| ProviderError::InvalidProxy)?
+            .is_no_proxy(uri)
+        {
+            return Ok(None);
+        }
+    }
+    let value = value
+        .into_string()
+        .map_err(|_| ProviderError::InvalidProxy)?;
+    let proxy = Proxy::new(value.trim()).map_err(|_| ProviderError::InvalidProxy)?;
+    let valid_port = proxy.uri().authority().is_some_and(|authority| {
+        let authority = authority.as_str().rsplit('@').next().unwrap_or_default();
+        authority == proxy.host() || proxy.uri().port_u16().is_some_and(|port| port != 0)
+    });
+    if !matches!(proxy.protocol(), ProxyProtocol::Http | ProxyProtocol::Https)
+        || proxy.host().is_empty()
+        || !valid_port
+    {
+        return Err(ProviderError::InvalidProxy);
+    }
+    Ok(Some(proxy))
+}
+
 pub(super) fn model() -> String {
     match env::var("KNOWBOX_EMBED_MODEL") {
         Ok(s) if !s.trim().is_empty() => s.trim().to_owned(),
@@ -119,7 +170,7 @@ impl Provider {
         let timeout = timeout.min(Duration::from_secs(90));
         let agent = ureq::Agent::config_builder()
             .max_redirects(0)
-            .proxy(None)
+            .proxy(embedding_proxy(&uri)?)
             .timeout_global(Some(timeout))
             .build()
             .new_agent();

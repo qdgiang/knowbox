@@ -1,18 +1,23 @@
+mod misses;
 mod rescue;
+mod result;
 
 use std::collections::HashSet;
-use std::fs;
-use std::io::Write;
 
 use anyhow::Context;
-use jiff::civil::DateTime;
+use jiff::civil::Date;
 use rusqlite::{Connection, Row, params};
 
 use crate::config::KbRoot;
 use crate::index;
 use crate::notes::{self, ParseError};
-use crate::semantic::{self, RankedHit};
+use crate::semantic;
 use crate::store;
+use crate::usage::Layer;
+use result::{Answer, DirectMetadata, IndexStatus, Rerank};
+pub(crate) use result::{Hit, MatchKind, Ranks, SearchResult};
+
+pub(crate) use misses::{log_miss, misses};
 
 const STOP: &str = "a an and are as at be but by can did do does for from has have how i if in is it its just me my no not of on or so than that the then this to too very was we were when will with won t you your something anything thing stuff way kind sort quite really actually maybe please need needs needed want wants wanted";
 const LIMIT: usize = 6;
@@ -36,22 +41,27 @@ fn query_tokens(query: &str) -> Vec<String> {
     }
 }
 
-fn read_hit(row: &Row<'_>) -> rusqlite::Result<RankedHit> {
-    Ok(RankedHit {
+fn read_hit(row: &Row<'_>, match_kind: MatchKind) -> rusqlite::Result<Hit> {
+    Ok(Hit {
         id: row.get(0)?,
         path: row.get(1)?,
         title: row.get(2)?,
         snippet: row.get(3)?,
-        semantic_only: false,
+        match_kind,
+        ranks: Ranks::default(),
+        direct: None,
     })
 }
 
-fn lexical(db: &Connection, query: &str) -> rusqlite::Result<Vec<RankedHit>> {
+fn lexical(db: &Connection, query: &str, kind: MatchKind) -> rusqlite::Result<Vec<Hit>> {
     let mut ranked = Vec::new();
     // Scores from distinct tokenizers are not comparable: merge by rank, primary table first on ties.
     for (order, table) in ["kb", "kb_d"].into_iter().enumerate() {
         let mut stmt = db.prepare(&format!("SELECT id, path, title, snippet({table}, 9, '>>>', '<<<', '…', 12), bm25({table}, 0.0, 0.0, 10.0, 1.0, 1.0, 5.0, 8.0, 6.0, 4.0, 1.0) AS score FROM {table} WHERE {table} MATCH ? ORDER BY score LIMIT ?"))?;
-        for (rank, row) in stmt.query_map(params![query, 6], read_hit)?.enumerate() {
+        for (rank, row) in stmt
+            .query_map(params![query, 6], |r| read_hit(r, kind))?
+            .enumerate()
+        {
             ranked.push((rank, order, row?));
         }
     }
@@ -75,8 +85,8 @@ fn lexical(db: &Connection, query: &str) -> rusqlite::Result<Vec<RankedHit>> {
 }
 
 enum Matches {
-    All(Vec<RankedHit>),
-    Partial(Vec<RankedHit>),
+    All(Vec<Hit>),
+    Partial(Vec<Hit>),
     None,
 }
 
@@ -92,11 +102,11 @@ fn search(db: &Connection, terms: &[String]) -> rusqlite::Result<Matches> {
             format!("\"{t}\"{star}")
         })
         .collect();
-    let all = lexical(db, &quoted.join(" AND "))?;
+    let all = lexical(db, &quoted.join(" AND "), MatchKind::Lexical)?;
     if !all.is_empty() {
         return Ok(Matches::All(all));
     }
-    let any = lexical(db, &quoted.join(" OR "))?;
+    let any = lexical(db, &quoted.join(" OR "), MatchKind::Partial)?;
     if !any.is_empty() {
         return Ok(Matches::Partial(any));
     }
@@ -111,7 +121,7 @@ fn search(db: &Connection, terms: &[String]) -> rusqlite::Result<Matches> {
     }
     let mut stmt = db.prepare("SELECT id, path, title, snippet(kb_tri, 3, '>>>', '<<<', '…', 12), bm25(kb_tri) AS score FROM kb_tri WHERE kb_tri MATCH ? ORDER BY score LIMIT ?")?;
     let tri = stmt
-        .query_map(params![tq, 6], read_hit)?
+        .query_map(params![tq, 6], |r| read_hit(r, MatchKind::Trigram))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(if tri.is_empty() {
         Matches::None
@@ -120,86 +130,99 @@ fn search(db: &Connection, terms: &[String]) -> rusqlite::Result<Matches> {
     })
 }
 
-enum DirectHit {
-    Missing,
-    Malformed,
-    Note(String),
-}
-
-fn print_own_id(root: &KbRoot, query: &str, out: &mut impl Write) -> anyhow::Result<DirectHit> {
+fn direct_hit(
+    root: &KbRoot,
+    query: &str,
+    policy: &mut store::Inventory<'_>,
+) -> anyhow::Result<Option<Hit>> {
     let id = query.to_ascii_lowercase();
     if !id
         .strip_prefix("kb-")
         .is_some_and(|digits| !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()))
     {
-        return Ok(DirectHit::Missing);
+        return Ok(None);
     }
-    let Some(path) = notes::find(root, &id)? else {
-        return Ok(DirectHit::Missing);
+    let Some(path) = notes::find_with(root, &id, policy)? else {
+        return Ok(None);
     };
     let rel = path
         .strip_prefix(root.path())?
         .to_str()
         .context("note path is not UTF-8")?
         .replace(std::path::MAIN_SEPARATOR, "/");
-    store::regular_file(&path)?;
-    let bytes = fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
-    let note = match notes::parse(&bytes) {
-        Err(ParseError::Malformed) => {
-            writeln!(
-                out,
-                "{id}  {rel} ⚠MALFORMED\n    unterminated frontmatter — `knowbox show` prints it raw\n"
-            )?;
-            return Ok(DirectHit::Malformed);
+    let Some(bytes) = notes::read_with(&path, policy)? else {
+        return Ok(None);
+    };
+    let mut hit = Hit {
+        id: id.clone(),
+        path: rel,
+        title: String::new(),
+        snippet: String::new(),
+        match_kind: MatchKind::Id,
+        ranks: Ranks::default(),
+        direct: None,
+    };
+    let meta = match notes::parse(&bytes) {
+        Err(ParseError::Malformed) => DirectMetadata::Malformed,
+        parsed => {
+            let note = parsed.with_context(|| format!("parsing {}", hit.path))?;
+            hit.id = note
+                .scalar("id")
+                .filter(|s| !s.is_empty())
+                .unwrap_or(&id)
+                .to_owned();
+            hit.title = note.text("title", "?").into_owned();
+            hit.snippet = note
+                .body
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+                .chars()
+                .take(160)
+                .collect();
+            DirectMetadata::Parsed {
+                superseded: note.scalar("status") == Some("superseded"),
+                display_id: note.text("id", &id).into_owned(),
+            }
         }
-        result => result.with_context(|| format!("parsing {rel}"))?,
     };
-    let label = if note.scalar("status") == Some("superseded") {
-        " ⚠SUPERSEDED"
-    } else {
-        ""
-    };
-    let snippet: String = note
-        .body
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .chars()
-        .take(160)
-        .collect();
-    writeln!(
-        out,
-        "{}  {rel}{label}\n    {}\n    {snippet}\n",
-        note.text("id", &id),
-        note.text("title", "?")
-    )?;
-    let graph_id = note.scalar("id").filter(|id| !id.is_empty()).unwrap_or(&id);
-    Ok(DirectHit::Note(graph_id.to_owned()))
+    hit.direct = Some(meta);
+    Ok(Some(hit))
 }
 
-/// Search by ID or lexical rank; the semantic provider is never called on an exact or typo hit.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct Options {
+    pub(crate) expand: bool,
+    pub(crate) local: bool,
+    pub(crate) no_fix: bool,
+    pub(crate) no_write: bool,
+}
+
 pub(crate) fn run(
     root: &KbRoot,
     query: &str,
-    expand: bool,
-    now: DateTime,
-    out: &mut impl Write,
-    err: &mut impl Write,
-) -> anyhow::Result<()> {
-    match print_own_id(root, query, out)? {
-        DirectHit::Missing => {}
-        DirectHit::Malformed => return Ok(()),
-        DirectHit::Note(id) => {
-            if expand {
-                expand_hits(root, &[&id], out, err)?;
-            }
-            return Ok(());
+    options: Options,
+    today: Date,
+    policy: &mut store::Inventory<'_>,
+) -> anyhow::Result<SearchResult> {
+    if let Some(hit) = direct_hit(root, query, policy)? {
+        let expand = options.expand && matches!(hit.direct, Some(DirectMetadata::Parsed { .. }));
+        let mut answer = Answer::new(IndexStatus::Unchecked, Layer::Id);
+        answer.hits.push(hit);
+        if expand {
+            expand_hits(root, &mut answer, policy);
         }
+        return Ok(SearchResult::Ok(answer));
     }
     let terms = query_tokens(query);
-    let ((matches, fixes), rebuilt) = index::with_current(root, |db, notes| {
+    let stale = if options.no_write {
+        index::StalePolicy::Report
+    } else {
+        index::StalePolicy::TemporarySnapshot
+    };
+    let indexed = index::with_current(root, policy, stale, |db, notes| {
         let matches = search(db, &terms)?;
-        if matches!(matches, Matches::None) && !terms.is_empty() {
+        if !options.no_fix && matches!(matches, Matches::None) && !terms.is_empty() {
             let (fixed, fixes) = rescue::typo(&terms, notes);
             if !fixes.is_empty() {
                 return Ok((search(db, &query_tokens(&fixed.join(" ")))?, fixes));
@@ -208,96 +231,116 @@ pub(crate) fn run(
         Ok((matches, Vec::new()))
     })
     .context("searching the SQLite index")?;
-    if rebuilt {
-        writeln!(err, "(index was stale — rebuilt from current notes)")?;
-    }
-    if !matches!(matches, Matches::None) && !fixes.is_empty() {
-        writeln!(out, "(typo-corrected: {})", fixes.join(", "))?;
-    }
-    let rows = match matches {
-        Matches::All(rows) => rows,
-        Matches::Partial(rows) => {
-            writeln!(out, "(partial match — no note contains all query terms)")?;
-            if fixes.is_empty() {
-                let fused = semantic::fuse(query, &rows, root, now.date());
-                if fused.changed {
-                    let label = if fused.recency_changed {
-                        "(hybrid re-rank: lexical + semantic + recency)"
-                    } else {
-                        "(hybrid re-rank: lexical + semantic agreement)"
-                    };
-                    writeln!(out, "{label}")?;
-                }
-                fused.rows
-            } else {
-                rows
-            }
+    let (index_status, (matches, fixes)) = match indexed {
+        index::IndexRead::Stale => {
+            return Ok(SearchResult::StaleIndex {
+                guidance: "search index is stale. Run 'knowbox reindex' to refresh.",
+            });
         }
+        index::IndexRead::Current(answer) => (IndexStatus::Fresh, answer),
+        index::IndexRead::Temporary(answer) => (IndexStatus::TemporarySnapshot, answer),
+    };
+
+    let (mut rows, partial) = match matches {
+        Matches::All(rows) => (rows, false),
+        Matches::Partial(rows) => (rows, true),
         Matches::None => {
-            let hits = semantic::rescue(root, query);
-            if !hits.is_empty() {
-                writeln!(
-                    out,
-                    "(BM25 missed — semantic matches; cos <0.45 is likely-absent territory, verify before relying on these:)"
-                )?;
-                for hit in hits {
-                    writeln!(
-                        out,
-                        "{}  {}  [cos {:.3}]\n    {}\n",
-                        hit.id, hit.path, hit.score, hit.title
-                    )?;
-                }
-                return Ok(());
-            }
-            let refs = rescue::refs(root, &terms)?;
-            if refs.is_empty() {
-                rescue::log_miss(root, query, now)?;
-                writeln!(
-                    out,
-                    "no matches. try: a synonym | broader term | `knowbox list`"
-                )?;
-            } else {
-                writeln!(
-                    out,
-                    "refs/ mentions (not FTS-indexed — find the section-map note via `knowbox search` on the doc title):"
-                )?;
-                for hit in refs {
-                    writeln!(out, "    {hit}")?;
-                }
-            }
-            return Ok(());
+            return Ok(SearchResult::Ok(fallback(
+                root,
+                query,
+                &terms,
+                index_status,
+                options,
+                policy,
+            )?));
         }
     };
-    for hit in &rows {
-        let snippet = hit.snippet.split_whitespace().collect::<Vec<_>>().join(" ");
-        let label = if hit.semantic_only {
-            " (semantic-only)"
-        } else {
-            ""
-        };
-        writeln!(
-            out,
-            "{}  {}{label}\n    {}\n    {}\n",
-            hit.id, hit.path, hit.title, snippet
-        )?;
+    let layer = if !fixes.is_empty() {
+        Layer::Typo
+    } else if partial {
+        Layer::Partial
+    } else {
+        Layer::Lexical
+    };
+    let mut answer = Answer::new(index_status, layer);
+    answer.partial = partial;
+    for (i, hit) in rows.iter_mut().enumerate() {
+        hit.ranks.bm25_rank = Some(i + 1);
+        if layer == Layer::Typo {
+            hit.match_kind = MatchKind::Typo;
+        }
     }
-    if expand && fixes.is_empty() {
-        let ids: Vec<_> = rows.iter().map(|hit| hit.id.as_str()).collect();
-        expand_hits(root, &ids, out, err)?;
+    answer.corrections = fixes;
+    if partial && layer != Layer::Typo && !options.local {
+        let fused = semantic::fuse(query, &rows, root, today, policy);
+        if fused.changed {
+            answer.rerank = Some(if fused.recency_changed {
+                Rerank::Recency
+            } else {
+                Rerank::Agreement
+            });
+        }
+        rows = fused.rows;
     }
-    Ok(())
+    for hit in &mut rows {
+        hit.snippet = hit.snippet.split_whitespace().collect::<Vec<_>>().join(" ");
+    }
+    answer.hits = rows;
+    if options.expand && layer != Layer::Typo {
+        expand_hits(root, &mut answer, policy);
+    }
+    Ok(SearchResult::Ok(answer))
 }
 
-fn expand_hits(
+fn fallback(
     root: &KbRoot,
-    ids: &[&str],
-    out: &mut impl Write,
-    err: &mut impl Write,
-) -> std::io::Result<()> {
-    if let Err(problem) = crate::browse::search_expansion(root, ids, out) {
-        writeln!(err, "knowbox: omitting graph expansion: {problem:#}")?;
+    query: &str,
+    terms: &[String],
+    index_status: IndexStatus,
+    options: Options,
+    policy: &mut store::Inventory<'_>,
+) -> anyhow::Result<Answer> {
+    if !options.local {
+        let hits = semantic::rescue(root, query, policy);
+        if !hits.is_empty() {
+            let mut answer = Answer::new(index_status, Layer::Semantic);
+            answer.hits = hits
+                .into_iter()
+                .enumerate()
+                .map(|(i, hit)| Hit {
+                    id: hit.id,
+                    path: hit.path,
+                    title: hit.title,
+                    snippet: String::new(),
+                    match_kind: MatchKind::SemanticOnly,
+                    ranks: Ranks {
+                        cosine: Some(hit.score),
+                        cosine_rank: Some(i + 1),
+                        ..Ranks::default()
+                    },
+                    direct: None,
+                })
+                .collect();
+            return Ok(answer);
+        }
     }
-    Ok(())
+    let refs = rescue::refs(root, terms, policy)?;
+    let layer = if refs.is_empty() {
+        Layer::Miss
+    } else {
+        Layer::Refs
+    };
+    let mut answer = Answer::new(index_status, layer);
+    answer.refs = refs;
+    Ok(answer)
+}
+
+fn expand_hits(root: &KbRoot, answer: &mut Answer, policy: &mut store::Inventory<'_>) {
+    let ids: Vec<_> = answer.hits.iter().map(|hit| hit.id.as_str()).collect();
+    match crate::browse::search_expansion(root, &ids, policy) {
+        Ok(rows) => answer.expanded = rows,
+        Err(problem) => answer.expansion_error = Some(format!("{problem:#}")),
+    }
 }
 
 #[cfg(test)]

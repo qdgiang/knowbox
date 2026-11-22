@@ -1,30 +1,39 @@
+pub(crate) mod audit;
+pub(crate) mod mutation;
 mod new;
 mod rewrite;
 mod supersede;
 #[cfg(test)]
 mod tests;
+pub(crate) mod transaction;
 
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, ensure};
-use jiff::civil::Date;
+use serde::{Deserialize, Serialize};
+use tempfile::TempDir;
 
 use crate::config::KbRoot;
+use crate::journal::{self, Stamp};
 use crate::notes::{self, LookupError};
 use crate::store::{self, WriteLock};
 
+use audit::{Baseline, Transition};
+pub(crate) use new::validate_frontmatter;
 pub(crate) use new::{NewArgs, create, prepare_new};
 pub(crate) use supersede::supersede;
+use transaction::FileWrite;
 
 #[derive(Debug)]
 pub(crate) struct Draft {
-    args: NewArgs,
-    body: String,
+    pub(crate) title: String,
+    text: String,
+    edited: Option<TempDir>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Deserialize, Serialize)]
 pub(crate) struct Event {
     pub(crate) subject: String,
     pub(crate) stdout: String,
@@ -50,25 +59,138 @@ fn read_log(root: &KbRoot) -> Result<String> {
 
 pub(crate) fn append_entry(
     lock: &WriteLock,
-    today: Date,
+    stamp: &Stamp<'_>,
     action: &str,
     id: &str,
     detail: &str,
 ) -> Result<()> {
-    for (name, value) in [("action", action), ("id", id), ("detail", detail)] {
-        single_line(name, value)?;
+    let log = prepare_entry(lock, stamp, action, id, detail)?;
+    publish_log(lock, &log)
+}
+
+pub(crate) fn prepare_entry(
+    lock: &WriteLock,
+    stamp: &Stamp<'_>,
+    action: &str,
+    id: &str,
+    detail: &str,
+) -> Result<Vec<u8>> {
+    let mut log = read_log(lock.root())?.into_bytes();
+    write_entry(&mut log, stamp, action, id, detail, &[])?;
+    Ok(log)
+}
+
+fn write_entry(
+    log: &mut Vec<u8>,
+    stamp: &Stamp<'_>,
+    action: &str,
+    id: &str,
+    detail: &str,
+    transitions: &[Transition],
+) -> Result<()> {
+    if !log.is_empty() && !log.ends_with(b"\n") {
+        log.push(b'\n');
     }
-    ensure!(
-        !action.contains('|') && !id.contains('|'),
-        "journal action and id cannot contain a pipe"
-    );
-    let mut bytes = read_log(lock.root())?.into_bytes();
-    if !bytes.is_empty() && !bytes.ends_with(b"\n") {
-        bytes.push(b'\n');
+    writeln!(log, "{}", stamp.heading(action, id, detail)?)?;
+    for transition in transitions {
+        transition.write_line(log)?;
     }
-    writeln!(bytes, "## [{today}] {action} | {id} | {detail}")?;
-    store::atomic_write(&lock.root().path().join("log.md"), &bytes)?;
     Ok(())
+}
+
+pub(crate) fn publish_log(lock: &WriteLock, bytes: &[u8]) -> Result<()> {
+    Ok(store::atomic_write(
+        &lock.root().path().join("log.md"),
+        bytes,
+    )?)
+}
+
+fn write_manual(log: &mut Vec<u8>, stamp: &Stamp<'_>, changes: &[Transition]) -> Result<()> {
+    let actor = stamp.actor.manual();
+    let manual = Stamp {
+        actor: &actor,
+        time: stamp.time.clone(),
+    };
+    for change in changes {
+        write_entry(
+            log,
+            &manual,
+            "edit",
+            change.id(),
+            &change.description(),
+            std::slice::from_ref(change),
+        )?;
+    }
+    Ok(())
+}
+
+pub(crate) fn seed_audit(lock: &WriteLock) -> Result<()> {
+    Baseline::load(lock)?;
+    Ok(())
+}
+
+pub(crate) fn audit_manual(
+    lock: &WriteLock,
+    stamp: &Stamp<'_>,
+    observed: &[notes::NoteEntry],
+) -> Result<()> {
+    let changes = Baseline::load(lock)?.drift(observed);
+    if !changes.is_empty() {
+        let mut log = read_log(lock.root())?.into_bytes();
+        write_manual(&mut log, stamp, &changes)?;
+        publish_log(lock, &log)?;
+    }
+    Ok(())
+}
+
+fn note_journal(
+    lock: &WriteLock,
+    stamp: &Stamp<'_>,
+    action: &str,
+    id: &str,
+    detail: &str,
+    writes: &[FileWrite<'_>],
+) -> Result<Vec<u8>> {
+    let log = prepare_note_entry(lock, stamp, action, id, detail, writes)?;
+    transaction::stage(lock, &log, writes)?;
+    Ok(log)
+}
+
+fn prepare_note_entry(
+    lock: &WriteLock,
+    stamp: &Stamp<'_>,
+    action: &str,
+    id: &str,
+    detail: &str,
+    writes: &[FileWrite<'_>],
+) -> Result<Vec<u8>> {
+    let mut log = read_log(lock.root())?.into_bytes();
+    append_note_entry(lock, &mut log, stamp, action, id, detail, writes)?;
+    Ok(log)
+}
+
+fn append_note_entry(
+    lock: &WriteLock,
+    log: &mut Vec<u8>,
+    stamp: &Stamp<'_>,
+    action: &str,
+    id: &str,
+    detail: &str,
+    writes: &[FileWrite<'_>],
+) -> Result<()> {
+    let baseline = Baseline::load(lock)?;
+    let mut transitions = Vec::with_capacity(writes.len());
+    for write in writes {
+        if let Some(change) = baseline.preimage(write.path, write.before)? {
+            write_manual(log, stamp, &[change])?;
+        }
+        transitions.push(Transition::between(
+            write.path,
+            write.before,
+            Some(write.after),
+        )?);
+    }
+    write_entry(log, stamp, action, id, detail, &transitions)
 }
 
 // Any-width filename prefix, including tombstones with a non-Markdown suffix.
@@ -101,7 +223,7 @@ pub(crate) fn next_id(root: &KbRoot) -> Result<String> {
         }
     }
     for line in notes::normalize_newlines(&read_log(root)?).lines() {
-        if let Some((date, rest)) = line.strip_prefix("## [").and_then(|s| s.split_once(']'))
+        if let Some((date, rest)) = journal::split_heading(line)
             && !date.is_empty()
             && let Some(number) = rest
                 .strip_prefix(" create | ")
@@ -127,7 +249,7 @@ fn read_note(path: &Path) -> Result<Vec<u8>> {
         "missing note {}",
         path.display()
     );
-    fs::read(path).with_context(|| format!("reading {}", path.display()))
+    store::read_regular(path).with_context(|| format!("reading {}", path.display()))
 }
 
 fn actual_id(note: &notes::Note) -> Result<&str> {
@@ -136,16 +258,32 @@ fn actual_id(note: &notes::Note) -> Result<&str> {
         .context("note must have a four-digit kb-NNNN id")
 }
 
-pub(crate) fn touch(lock: &WriteLock, selector: &str, today: Date) -> Result<PathBuf> {
+pub(crate) fn touch(lock: &WriteLock, selector: &str, stamp: &Stamp<'_>) -> Result<PathBuf> {
     let path = locate(lock.root(), selector)?;
     let bytes = read_note(&path)?;
     let parsed = notes::parse(&bytes).with_context(|| format!("parsing {}", path.display()))?;
     let id = actual_id(&parsed).with_context(|| format!("checking {}", path.display()))?;
-    let updated = rewrite::edit(&bytes, &[("updated", &today.to_string())], None, None)
-        .with_context(|| format!("updating {}", path.display()))?;
-    read_log(lock.root())?;
-    store::atomic_write(&path, &updated)?;
-    append_entry(lock, today, "update", id, "touched")
+    let updated = rewrite::edit(
+        &bytes,
+        &[("updated", &stamp.date().to_string())],
+        None,
+        None,
+    )
+    .with_context(|| format!("updating {}", path.display()))?;
+    let log = note_journal(
+        lock,
+        stamp,
+        "update",
+        id,
+        "touched",
+        &[FileWrite {
+            path: &path,
+            before: Some(&bytes),
+            after: &updated,
+        }],
+    )?;
+    store::atomic_write(&path, &updated).map_err(|error| transaction::abort(lock, error.into()))?;
+    transaction::finish(lock, &log)
         .with_context(|| format!("{} was touched but not journaled", path.display()))?;
     Ok(path)
 }
@@ -154,7 +292,7 @@ pub(crate) fn verify(
     lock: &WriteLock,
     ids: &[String],
     evidence: &str,
-    today: Date,
+    stamp: &Stamp<'_>,
     out: &mut impl Write,
 ) -> Result<Option<Event>> {
     single_line("evidence", evidence)?;
@@ -163,7 +301,7 @@ pub(crate) fn verify(
     }
     read_log(lock.root())?;
     let mut touched = Vec::new();
-    if let Err(error) = verify_batch(lock, ids, evidence, today, out, &mut touched) {
+    if let Err(error) = verify_batch(lock, ids, evidence, stamp, out, &mut touched) {
         if touched.is_empty() {
             return Err(error);
         }
@@ -186,7 +324,7 @@ fn verify_batch(
     lock: &WriteLock,
     ids: &[String],
     evidence: &str,
-    today: Date,
+    stamp: &Stamp<'_>,
     out: &mut impl Write,
     touched: &mut Vec<String>,
 ) -> Result<()> {
@@ -229,7 +367,7 @@ fn verify_batch(
         if touched.iter().any(|s| s == id) {
             continue;
         }
-        let date = today.to_string();
+        let date = stamp.date().to_string();
         let updated = rewrite::edit(
             &bytes,
             &[
@@ -241,8 +379,21 @@ fn verify_batch(
             None,
         )
         .with_context(|| format!("verifying {}", path.display()))?;
-        store::atomic_write(&path, &updated)?;
-        append_entry(lock, today, "verify", id, evidence)
+        let log = note_journal(
+            lock,
+            stamp,
+            "verify",
+            id,
+            evidence,
+            &[FileWrite {
+                path: &path,
+                before: Some(&bytes),
+                after: &updated,
+            }],
+        )?;
+        store::atomic_write(&path, &updated)
+            .map_err(|error| transaction::abort(lock, error.into()))?;
+        transaction::finish(lock, &log)
             .with_context(|| format!("{} was verified but not journaled", path.display()))?;
         touched.push(id.to_owned());
     }

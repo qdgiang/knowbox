@@ -9,6 +9,16 @@ use super::GitError;
 
 pub(super) fn command(root: &Path) -> Command {
     let mut cmd = Command::new("git");
+    let prefix = b"GIT_CONFIG";
+    for (key, _) in std::env::vars_os() {
+        if key
+            .as_encoded_bytes()
+            .get(..prefix.len())
+            .is_some_and(|start| start.eq_ignore_ascii_case(prefix))
+        {
+            cmd.env_remove(key);
+        }
+    }
     cmd.current_dir(root)
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("GIT_OPTIONAL_LOCKS", "0")
@@ -33,11 +43,7 @@ pub(super) struct Output {
 
 impl Output {
     pub(super) fn checked(self) -> Result<Vec<u8>, GitError> {
-        if !self.status.success() {
-            return Err(self.failure()?);
-        }
-        let mut file = self.stdout;
-        file.rewind()?;
+        let file = self.checked_file()?;
         const LIMIT: u64 = 64 * 1024 * 1024;
         let mut data = Vec::new();
         file.take(LIMIT + 1).read_to_end(&mut data)?;
@@ -45,6 +51,15 @@ impl Output {
             return Err(GitError::Invalid("git output exceeded 64 MiB"));
         }
         Ok(data)
+    }
+
+    pub(super) fn checked_file(self) -> Result<File, GitError> {
+        if !self.status.success() {
+            return Err(self.failure()?);
+        }
+        let mut file = self.stdout;
+        file.rewind()?;
+        Ok(file)
     }
 
     pub(super) fn optional(self) -> Result<Option<Vec<u8>>, GitError> {
@@ -67,19 +82,19 @@ impl Output {
 }
 
 pub(super) fn run(cmd: &mut Command, op: &'static str) -> Result<Output, GitError> {
-    run_with_timeout(cmd, op, Duration::from_secs(60))
+    run_with_input(cmd, op, Stdio::null())
 }
 
-fn run_with_timeout(
+pub(super) fn run_with_input(
     cmd: &mut Command,
     op: &'static str,
-    timeout: Duration,
+    input: Stdio,
 ) -> Result<Output, GitError> {
     // Never wait for pipe EOF: a credential helper, hook or transport may inherit the handles.
     let stdout = tempfile::tempfile()?;
     let stderr = tempfile::tempfile()?;
     let mut child = cmd
-        .stdin(Stdio::null())
+        .stdin(input)
         .stdout(stdout.try_clone()?)
         .stderr(stderr.try_clone()?)
         .spawn()
@@ -94,7 +109,7 @@ fn run_with_timeout(
                 stderr,
             });
         }
-        let left = timeout.saturating_sub(start.elapsed());
+        let left = Duration::from_secs(60).saturating_sub(start.elapsed());
         if left.is_zero() {
             child.kill()?;
             child.wait()?;

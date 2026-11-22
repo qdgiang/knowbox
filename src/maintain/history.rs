@@ -1,8 +1,12 @@
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::journal::{local_day, split_heading};
 use crate::notes::id_prefix;
 
 use super::{is_line_break, iso_date, repr};
+
+pub(super) const MISSING_CREATE: &str =
+    "no create entry in log.md (created after the journal started — hand-made note?)";
 
 #[derive(Debug, Default)]
 pub(super) struct History<'a> {
@@ -14,15 +18,11 @@ impl<'a> History<'a> {
     pub(super) fn parse(text: &'a str) -> Self {
         let mut history = Self::default();
         for line in text.split(['\r', '\n']) {
-            let Some((date, rest)) = line
-                .strip_prefix("## [")
-                .and_then(|line| line.split_once(']'))
+            let Some((date, rest)) =
+                split_heading(line).and_then(|(stamp, rest)| Some((local_day(stamp)?, rest)))
             else {
                 continue;
             };
-            if !iso_date(date) {
-                continue;
-            }
             history.first.get_or_insert(date);
             if let Some(id) = rest.strip_prefix(" create | ").and_then(id_prefix) {
                 history.creates.entry(id).or_default().push(date);
@@ -49,13 +49,14 @@ impl<'a> History<'a> {
                     "created: {display_date} matches no log.md create date for {id} ({unique})"
                 ));
             }
-        } else if self.first.is_some_and(|first| created > first) {
-            warnings.push(
-                "no create entry in log.md (created after the journal started — hand-made note?)"
-                    .into(),
-            );
         }
         warnings
+    }
+
+    pub(super) fn missing_create(&self, id: &str, created: &str) -> bool {
+        iso_date(created)
+            && !self.creates.contains_key(id)
+            && self.first.is_some_and(|first| created > first)
     }
 }
 

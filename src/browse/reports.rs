@@ -1,230 +1,56 @@
 use std::borrow::Cow;
 use std::cmp::Reverse;
-use std::fs;
-use std::io::{self, Write};
-use std::path::Path;
+use std::io::Write;
 
-use anyhow::{Context, bail};
+use anyhow::bail;
 use jiff::civil::{Date, ISOWeekDate};
+use serde::Serialize;
 
+use super::refs::python_whitespace;
+use super::{display_list, truthy_text};
 use crate::config::KbRoot;
-use crate::notes::{self, normalize_newlines};
-use crate::store;
+use crate::notes::{self, NoteValue};
+use crate::store::Inventory;
 
-use super::{display_list, parsed_notes, truthy_text};
-
-const HEADING_CAP: usize = 12;
-const HEADING_WIDTH: usize = 70;
 const STALE_TITLE_WIDTH: usize = 58;
 
-struct Doc {
-    name: String,
-    content: io::Result<DocContent>,
-}
-
-struct DocContent {
-    words: usize,
-    headings: Vec<String>,
-    maps: Vec<String>,
-}
-
-impl Doc {
-    fn matches(&self, filter: &str) -> bool {
-        self.name.to_lowercase().contains(filter)
-            || self.content.as_ref().is_ok_and(|content| {
-                content
-                    .headings
-                    .iter()
-                    .chain(&content.maps)
-                    .any(|value| value.to_lowercase().contains(filter))
-            })
-    }
-}
-
-/// Report sorted Markdown reference headings and their live section-map notes.
-pub(crate) fn refs(root: &KbRoot, filter: &str, out: &mut impl Write) -> anyhow::Result<()> {
-    let directory = root.path().join("refs");
-    if !store::directory(&directory)? {
-        writeln!(
-            out,
-            "knowbox refs: no refs/ directory — nothing ingested yet"
-        )?;
-        return Ok(());
-    }
-    let names = markdown_names(&directory)?;
-    if names.is_empty() {
-        writeln!(out, "knowbox refs: refs/ is empty")?;
-        return Ok(());
-    }
-    let entries = notes::snapshot(root)?;
-    let maps: Vec<_> = parsed_notes(&entries)
-        .filter(|&(_, note)| {
-            note.scalar("type") == Some("reference") && note.scalar("status") != Some("superseded")
-        })
-        .map(|(_, note)| {
-            (
-                note.text("id", "?"),
-                note.text("title", ""),
-                note.text("summary", ""),
-                note.body.as_str(),
-            )
-        })
-        .collect();
-
-    let mut docs = Vec::with_capacity(names.len());
-    for name in names {
-        let path = directory.join(&name);
-        if !store::regular_file(&path)? {
-            continue;
-        }
-        let content = fs::read(&path).map(|bytes| {
-            let text = String::from_utf8_lossy(&bytes);
-            let text = normalize_newlines(&text);
-            let map_ids = maps
-                .iter()
-                .filter(|(_, title, summary, body)| {
-                    title.contains(&name) || summary.contains(&name) || body.contains(&name)
-                })
-                .map(|(id, _, _, _)| id.to_string())
-                .collect();
-            DocContent {
-                words: text
-                    .split(python_whitespace)
-                    .filter(|word| !word.is_empty())
-                    .count(),
-                headings: headings(&text),
-                maps: map_ids,
-            }
-        });
-        docs.push(Doc { name, content });
-    }
-    render_refs(
-        &docs,
-        &filter.trim_matches(python_whitespace).to_lowercase(),
-        out,
-    )
-}
-
-fn markdown_names(dir: &Path) -> anyhow::Result<Vec<String>> {
-    let mut names = Vec::new();
-    for entry in fs::read_dir(dir).with_context(|| format!("listing {}", dir.display()))? {
-        let entry = entry?;
-        let name = entry.file_name();
-        if !name.as_encoded_bytes().ends_with(b".md") {
-            continue;
-        }
-        if entry.file_type()?.is_dir() {
-            // A real directory is out of scope, but a junction must still be refused.
-            store::directory(&entry.path())?;
-            continue;
-        }
-        let name = name.into_string().map_err(|_| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("non-UTF-8 reference name: {}", entry.path().display()),
-            )
-        })?;
-        names.push(name);
-    }
-    names.sort_unstable();
-    Ok(names)
-}
-
-fn python_whitespace(ch: char) -> bool {
-    ch.is_whitespace() || matches!(ch, '\u{1c}'..='\u{1f}')
-}
-
-fn headings(text: &str) -> Vec<String> {
-    let mut in_fence = false;
-    text.split([
-        '\n', '\u{b}', '\u{c}', '\u{1c}', '\u{1d}', '\u{1e}', '\u{85}', '\u{2028}', '\u{2029}',
-    ])
-    .filter_map(|line| {
-        if line
-            .trim_start_matches(python_whitespace)
-            .starts_with("```")
-        {
-            in_fence = !in_fence;
-            return None;
-        }
-        if in_fence {
-            return None;
-        }
-        line.strip_prefix("## ")
-            .map(|heading| heading.trim_matches(python_whitespace).to_owned())
-    })
-    .collect()
-}
-
-fn render_refs(docs: &[Doc], filter: &str, out: &mut impl Write) -> anyhow::Result<()> {
-    let shown: Vec<_> = docs.iter().filter(|doc| doc.matches(filter)).collect();
-    writeln!(
-        out,
-        "knowbox refs — heading index over refs/ ({} of {} docs shown; read via the map note, section by section, never whole)",
-        shown.len(),
-        docs.len()
-    )?;
-    for doc in shown {
-        let name = &doc.name;
-        match &doc.content {
-            Err(error) => writeln!(out, "\n{name}  [?]  map: UNREADABLE ({error})")?,
-            Ok(content) => {
-                let label = if content.maps.is_empty() {
-                    "UNMAPPED".to_owned()
-                } else {
-                    content.maps.join(",")
-                };
-                writeln!(out, "\n{name}  [{}w]  map: {label}", content.words)?;
-                for heading in content.headings.iter().take(HEADING_CAP) {
-                    writeln!(out, "  - {}", truncate(heading, HEADING_WIDTH))?;
-                }
-                if content.headings.len() > HEADING_CAP {
-                    writeln!(
-                        out,
-                        "  … +{} more sections",
-                        content.headings.len() - HEADING_CAP
-                    )?;
-                }
-            }
-        }
-    }
-    let unmapped = docs
-        .iter()
-        .filter(|doc| {
-            doc.content
-                .as_ref()
-                .is_ok_and(|content| content.maps.is_empty())
-        })
-        .count();
-    writeln!(
-        out,
-        "\n{} doc(s), {} mapped, {unmapped} UNMAPPED",
-        docs.len(),
-        docs.len() - unmapped
-    )?;
-    if unmapped > 0 {
-        writeln!(
-            out,
-            "act on UNMAPPED: create a type:reference section-map note (SCHEMA.md § Large docs) — unmapped docs are invisible to the need-knowledge protocol."
-        )?;
-    }
-    Ok(())
-}
-
-fn truncate(text: &str, width: usize) -> &str {
+pub(super) fn truncate(text: &str, width: usize) -> &str {
     text.char_indices()
         .nth(width)
         .map_or(text, |(index, _)| &text[..index])
 }
 
-struct StaleRow<'a> {
-    age: i64,
-    flags: String,
-    id: Cow<'a, str>,
-    status: Cow<'a, str>,
-    updated: Cow<'a, str>,
-    verified: Option<Cow<'a, str>>,
-    title: Cow<'a, str>,
+#[derive(Debug, Serialize)]
+pub(crate) struct StaleReport {
+    days: u32,
+    as_of: String,
+    rows: Vec<StaleRow>,
+}
+
+impl StaleReport {
+    pub(crate) fn edited_since_verify(&self) -> usize {
+        self.rows
+            .iter()
+            .filter(|row| row.flags.contains(&"EDITED-SINCE-VERIFY"))
+            .count()
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct StaleRow {
+    path: String,
+    base_sha1: String,
+    age: Option<i64>,
+    flags: Vec<&'static str>,
+    id: String,
+    status: String,
+    created: Option<NoteValue>,
+    updated: Option<NoteValue>,
+    verified: Option<NoteValue>,
+    effective_update: Option<String>,
+    #[serde(skip)]
+    effective_verification: Option<String>,
+    title: String,
 }
 
 /// Report live notes ranked by day age at the supplied local calendar date.
@@ -232,20 +58,25 @@ pub(crate) fn stale(
     root: &KbRoot,
     days: u32,
     today: Date,
-    out: &mut impl Write,
-) -> anyhow::Result<()> {
+    policy: &mut Inventory<'_>,
+) -> anyhow::Result<StaleReport> {
     if days < 1 {
         bail!("knowbox stale: --days must be >= 1");
     }
-    let entries = notes::snapshot(root)?;
-    let mut rows: Vec<_> = parsed_notes(&entries)
-        .filter_map(|(_, note)| {
+    let entries = notes::snapshot_with(root, policy)?;
+    let mut rows: Vec<_> = entries
+        .into_iter()
+        .filter_map(|entry| {
+            let Ok(mut note) = entry.parsed else {
+                return None;
+            };
             if note.scalar("status") == Some("superseded") {
                 return None;
             }
-            let updated = truthy_text(note, "updated").or_else(|| truthy_text(note, "created"));
-            let verified = truthy_text(note, "verified");
-            let age = updated.as_deref().and_then(|date| {
+            let effective_update =
+                truthy_text(&note, "updated").or_else(|| truthy_text(&note, "created"));
+            let verified = truthy_text(&note, "verified");
+            let age = effective_update.as_deref().and_then(|date| {
                 parse_date(date).map(|date| today.duration_since(date).as_secs() / 86_400)
             });
             let mut flags = Vec::new();
@@ -253,65 +84,87 @@ pub(crate) fn stale(
                 flags.push("STALE");
             }
             if let Some(verified) = verified.as_deref() {
-                if updated.as_deref().is_some_and(|updated| updated > verified) {
+                if effective_update
+                    .as_deref()
+                    .is_some_and(|updated| updated > verified)
+                {
                     flags.push("EDITED-SINCE-VERIFY");
                 }
             } else if age.is_some_and(|age| age >= i64::from(days / 2)) {
                 flags.push("NEVER-VERIFIED");
             }
             Some(StaleRow {
-                age: age.unwrap_or(-1),
-                flags: flags.join("+"),
-                id: note.text("id", "?"),
-                status: note.text("status", "?"),
-                updated: updated.unwrap_or(Cow::Borrowed("?")),
-                verified,
-                title: display_list(note, "title"),
+                path: entry.relative,
+                base_sha1: entry.sha1,
+                age,
+                flags,
+                id: note.text("id", "?").into_owned(),
+                status: note.text("status", "?").into_owned(),
+                effective_update: effective_update.map(Cow::into_owned),
+                effective_verification: verified.map(Cow::into_owned),
+                title: display_list(&note, "title").into_owned(),
+                created: note.meta.remove("created"),
+                updated: note.meta.remove("updated"),
+                verified: note.meta.remove("verified"),
             })
         })
         .collect();
-    rows.sort_by(|a, b| (Reverse(a.age), &a.id).cmp(&(Reverse(b.age), &b.id)));
-    let Some(oldest) = rows.first() else {
-        writeln!(out, "knowbox stale: no live notes found")?;
-        return Ok(());
-    };
-    writeln!(
-        out,
-        "knowbox stale — live notes ranked by staleness (threshold: {days}d, never-verified flag at {}d; EDITED-SINCE-VERIFY = updated > verified, re-verify before relying)",
-        days / 2
-    )?;
-    writeln!(
-        out,
-        "{:16} {:8} {:9} {:11} {:>4} {:11} title",
-        "flag", "id", "status", "updated", "age", "verified"
-    )?;
-    for row in &rows {
+    rows.sort_by(|a, b| {
+        (Reverse(a.age.unwrap_or(-1)), &a.id).cmp(&(Reverse(b.age.unwrap_or(-1)), &b.id))
+    });
+    Ok(StaleReport {
+        days,
+        as_of: today.to_string(),
+        rows,
+    })
+}
+
+impl StaleReport {
+    pub(crate) fn render(&self, out: &mut impl Write) -> anyhow::Result<()> {
+        let days = self.days;
+        let rows = &self.rows;
+        let Some(oldest) = rows.first() else {
+            writeln!(out, "knowbox stale: no live notes found")?;
+            return Ok(());
+        };
         writeln!(
             out,
-            "{:16} {:8} {:9} {:11} {:>3}d {:11} {}",
-            row.flags,
-            row.id,
-            row.status,
-            row.updated,
-            row.age,
-            row.verified.as_deref().unwrap_or("never"),
-            truncate(&row.title, STALE_TITLE_WIDTH)
+            "knowbox stale — live notes ranked by staleness (threshold: {days}d, never-verified flag at {}d; EDITED-SINCE-VERIFY = updated > verified, re-verify before relying)",
+            days / 2
         )?;
-    }
-    let flagged = rows.iter().filter(|row| !row.flags.is_empty()).count();
-    writeln!(
-        out,
-        "\n{} live note(s); oldest update {}d ago; {flagged} flagged",
-        rows.len(),
-        oldest.age
-    )?;
-    if flagged > 0 {
         writeln!(
             out,
-            "act on flags: re-verify with 'knowbox verify ID --evidence …', update, or supersede."
+            "{:16} {:8} {:9} {:11} {:>4} {:11} title",
+            "flag", "id", "status", "updated", "age", "verified"
         )?;
+        for row in rows {
+            writeln!(
+                out,
+                "{:16} {:8} {:9} {:11} {:>3}d {:11} {}",
+                row.flags.join("+"),
+                row.id,
+                row.status,
+                row.effective_update.as_deref().unwrap_or("?"),
+                row.age.unwrap_or(-1),
+                row.effective_verification.as_deref().unwrap_or("never"),
+                truncate(&row.title, STALE_TITLE_WIDTH)
+            )?;
+        }
+        let flagged = rows.iter().filter(|row| !row.flags.is_empty()).count();
+        writeln!(
+            out,
+            "\n{} live note(s); oldest update {}d ago; {flagged} flagged",
+            rows.len(),
+            oldest.age.unwrap_or(-1)
+        )?;
+        if flagged > 0 {
+            writeln!(
+                out,
+                "act on flags: re-verify with 'knowbox verify ID --evidence …', update, or supersede."
+            )?;
+        }
+        Ok(())
     }
-    Ok(())
 }
 
 pub(crate) fn parse_date(value: &str) -> Option<Date> {
@@ -360,59 +213,7 @@ pub(crate) fn parse_date(value: &str) -> Option<Date> {
 mod tests {
     use super::super::tests::fixture;
     use super::*;
-
-    #[test]
-    fn refs_filters_by_map_id_skips_fences_and_counts_unicode_characters() -> anyhow::Result<()> {
-        let (_dir, root) = fixture()?;
-        let path = root.path().join("refs");
-        fs::create_dir(&path)?;
-        fs::create_dir(path.join("directory.md"))?;
-        fs::write(
-            path.join("a-guide.md"),
-            format!("## {}\r\n  ```md\r## Hidden\n```\n", "見".repeat(71)),
-        )?;
-        fs::write(path.join("b-orphan.md"), b"## No map")?;
-        fs::write(
-            root.path().join("notes/kb-0001.md"),
-            "---\nid: kb-0001\ntype: reference\n---\na-guide.md",
-        )?;
-        fs::write(
-            root.path().join("notes/kb-0002.md"),
-            "---\nid: kb-0002\ntype: reference\nstatus: superseded\n---\nb-orphan.md",
-        )?;
-        let mut out = Vec::new();
-        refs(&root, " KB-0001 ", &mut out)?;
-        assert_eq!(
-            String::from_utf8(out)?,
-            format!(
-                concat!(
-                    "knowbox refs — heading index over refs/ (1 of 2 docs shown; read via the map note, section by section, never whole)\n",
-                    "\na-guide.md  [6w]  map: kb-0001\n  - {}\n",
-                    "\n2 doc(s), 1 mapped, 1 UNMAPPED\n",
-                    "act on UNMAPPED: create a type:reference section-map note (SCHEMA.md § Large docs) — unmapped docs are invisible to the need-knowledge protocol.\n",
-                ),
-                "見".repeat(70)
-            )
-        );
-        Ok(())
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn refs_refuses_linked_documents_before_reading_them() -> anyhow::Result<()> {
-        let (_dir, root) = fixture()?;
-        let path = root.path().join("refs");
-        fs::create_dir(&path)?;
-        let external = root.path().join("elsewhere.md");
-        fs::write(&external, "## Never read")?;
-        std::os::unix::fs::symlink(external, path.join("external.md"))?;
-        let mut out = Vec::new();
-        assert!(
-            matches!(refs(&root, "", &mut out), Err(error) if error.downcast_ref::<io::Error>().is_some_and(|error| error.kind() == io::ErrorKind::InvalidInput))
-        );
-        assert_eq!(out, b"");
-        Ok(())
-    }
+    use std::fs;
 
     #[test]
     fn stale_uses_calendar_age_fallbacks_and_lexical_verification_order() -> anyhow::Result<()> {
@@ -441,7 +242,17 @@ mod tests {
             )?;
         }
         let mut out = Vec::new();
-        stale(&root, 2, Date::new(2024, 3, 1)?, &mut out)?;
+        let report = stale(&root, 2, Date::new(2024, 3, 1)?, &mut Inventory::Strict)?;
+        let json = serde_json::to_value(&report)?;
+        assert_eq!(
+            json["rows"][0]["flags"],
+            serde_json::json!(["STALE", "EDITED-SINCE-VERIFY"])
+        );
+        assert_eq!(json["rows"][1]["age"], 2);
+        assert_eq!(json["rows"][1]["updated"], serde_json::Value::Null);
+        assert_eq!(json["rows"][1]["created"], "2024-02-28");
+        assert_eq!(json["rows"][2]["age"], serde_json::Value::Null);
+        report.render(&mut out)?;
         assert_eq!(
             String::from_utf8(out)?,
             concat!(
@@ -454,6 +265,26 @@ mod tests {
                 "act on flags: re-verify with 'knowbox verify ID --evidence …', update, or supersede.\n",
             )
         );
+        Ok(())
+    }
+
+    #[test]
+    fn stale_reports_original_empty_date_fields_and_effective_fallback() -> anyhow::Result<()> {
+        let (_dir, root) = fixture()?;
+        fs::write(
+            root.path().join("notes/kb-0007.md"),
+            "---\nid: kb-0007\nupdated: []\ncreated: 2025-02-03\nverified: ''\n---",
+        )?;
+        let rows = serde_json::to_value(stale(
+            &root,
+            2,
+            Date::new(2025, 2, 5)?,
+            &mut Inventory::Strict,
+        )?)?;
+        assert_eq!(rows["rows"][0]["age"], 2);
+        assert_eq!(rows["rows"][0]["updated"], serde_json::json!([]));
+        assert_eq!(rows["rows"][0]["verified"], "");
+        assert_eq!(rows["rows"][0]["effective_update"], "2025-02-03");
         Ok(())
     }
 

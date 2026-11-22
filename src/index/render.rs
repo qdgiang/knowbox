@@ -1,32 +1,16 @@
 use std::collections::{BTreeMap, HashMap};
-use std::fs;
 use std::io;
-use std::path::Path;
 
 use crate::config::KbRoot;
 use crate::notes::{Note, NoteEntry};
-use crate::store;
+use crate::store::{EntryKind, Inventory};
 
-pub(crate) fn ref_names(root: &KbRoot) -> io::Result<Vec<String>> {
+pub(crate) fn ref_names(root: &KbRoot, policy: &mut Inventory<'_>) -> io::Result<Vec<String>> {
     let dir = root.path().join("refs");
-    if !store::directory(&dir)? {
+    if !policy.directory(&dir)? {
         return Ok(Vec::new());
     }
-    let mut names = Vec::new();
-    for entry in fs::read_dir(&dir)? {
-        let name = entry?.file_name();
-        let name = name.into_string().map_err(|name| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("non-UTF-8 ref name: {}", Path::new(&name).display()),
-            )
-        })?;
-        if !name.starts_with('.') {
-            names.push(name);
-        }
-    }
-    names.sort_unstable();
-    Ok(names)
+    policy.names(&dir, EntryKind::Visible)
 }
 
 pub(super) fn render(notes: &[NoteEntry], refs: &[String]) -> (String, usize) {

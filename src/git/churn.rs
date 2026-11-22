@@ -4,7 +4,8 @@ use std::io::Write;
 
 use anyhow::{Context, Result, ensure};
 
-use super::{discover, git_cmd, id_prefix, run};
+use super::{discover, history::read_cmd, id_prefix, run};
+use crate::store::Inventory;
 use crate::{config::KbRoot, notes};
 
 #[derive(Default)]
@@ -73,12 +74,17 @@ fn history(patch: &str) -> History<'_> {
     counts
 }
 
-pub(crate) fn churn(root: &KbRoot, days: u32, out: &mut impl Write) -> Result<()> {
+pub(crate) fn churn(
+    root: &KbRoot,
+    days: u32,
+    policy: &mut Inventory<'_>,
+    out: &mut impl Write,
+) -> Result<()> {
     ensure!(days >= 1, "knowbox churn: --days must be >= 1");
-    let _repo = discover(root)?.context("knowbox churn: no Git repository at KB root")?;
+    let repo = discover(root)?.context("knowbox churn: no Git repository at KB root")?;
     let since = format!("--since={days} days ago");
     let data = run(
-        git_cmd(root).args([
+        read_cmd(&repo).args([
             "-c",
             "core.quotePath=false",
             "log",
@@ -106,7 +112,7 @@ pub(crate) fn churn(root: &KbRoot, days: u32, out: &mut impl Write) -> Result<()
         )?;
         return Ok(());
     }
-    let titles: BTreeMap<_, _> = notes::snapshot(root)?
+    let titles: BTreeMap<_, _> = notes::snapshot_with(root, policy)?
         .into_iter()
         .filter_map(|e| e.parsed.ok())
         .filter_map(|n| {

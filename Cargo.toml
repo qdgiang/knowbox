@@ -1,20 +1,25 @@
 [package]
 publish = false
 name = "knowbox"
-version = "0.1.0"
+version = "1.4.0"
 edition = "2024"
 
 [dependencies]
 anyhow = { version = "1.0.104", default-features = false, features = ["std"] }
 clap = { version = "4.6.7", default-features = false, features = ["derive", "std", "help", "usage", "error-context", "suggestions"] }
+getrandom = { version = "0.2.17", default-features = false }
 jiff = { version = "0.2.44", default-features = false, features = ["std", "tz-system", "tzdb-bundle-platform", "tzdb-zoneinfo"] }
+percent-encoding = { version = "2.3.2", default-features = false }
+pulldown-cmark = { version = "0.13.6", default-features = false, features = ["html"] }
 rusqlite = { version = "0.42.0", default-features = false, features = ["bundled"] }
 serde = { version = "1.0.229", default-features = false, features = ["derive", "std"] }
 serde_json = { version = "1.0.154", default-features = false, features = ["std"] }
 sha1 = { version = "0.11.0", default-features = false }
 shlex = { version = "2.0.1", default-features = false, features = ["std"] }
+subtle = { version = "2.6.1", default-features = false }
 tempfile = { version = "3.27.0", default-features = false }
 thiserror = { version = "2.0.21", default-features = false, features = ["std"] }
+tiny_http = { version = "0.12.0", default-features = false }
 ureq = { version = "3.5.2", default-features = false, features = ["rustls"] }
 
 # House lint tables (kb-0275 refs file, section 5.1). A new workspace member needs [lints] workspace = true.
@@ -50,3 +55,12 @@ disallowed_methods = "deny"
 
 [lints]
 workspace = true
+
+[target."cfg(unix)".dependencies]
+rustix = { version = "1.1.6", default-features = false, features = ["fs", "std"] }
+
+[target."cfg(windows)".dependencies]
+winapi-util = { version = "0.1.11", default-features = false }
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+rustix = { version = "1.1.6", default-features = false, features = ["pty", "std"] }

@@ -7,6 +7,18 @@ Rust workspace. The toolchain is pinned in `rust-toolchain.toml`; cargo picks it
 - `knowbox` is a binary for a Markdown knowledge base on Linux, native Windows, and macOS.
 - Test commands against disposable roots only. Never point the development binary at the live `~/knowbox`.
 
+## Agent note changes
+
+Agents must make every note change through the `knowbox` CLI. Never create, edit,
+or replace note files with file tools, shell commands, or an editor. Use
+`knowbox new` to create notes and `knowbox edit` to change an existing claim
+whose first sentence still holds. Use `knowbox touch`, `knowbox verify`,
+`knowbox link` and `knowbox supersede OLD --with NEW` for their respective
+changes. Use `knowbox verdict` and `knowbox raw-mark` for Review decisions.
+
+Use `knowbox usage` when inspecting note opens or search outcomes. The
+usage log and rollup are local data.
+
 ## Commands
 - After each logical change: `cargo check -p knowbox --message-format=short`.
 - One test: `cargo test -p <crate> <test_name>`. Narrowest test first; the whole suite only when shared
@@ -16,18 +28,6 @@ Rust workspace. The toolchain is pinned in `rust-toolchain.toml`; cargo picks it
 - Long cargo output: redirect it to a file and read the file. Do not pipe it to `head` or `tail`.
 - Never `cargo install`, `rustup default`, `rustup override`, or set `RUSTUP_TOOLCHAIN`. No `--release`
   builds unless asked.
-
-## After a CLI fix on fedora-server
-- The user has asked that fixes affecting the installed CLI be deployed after `scripts/gate.sh full`
-  passes. Rebuild with `cargo build --locked --offline --bin knowbox` and install the fix through
-  the existing local-only Homebrew formula `giang/local/knowbox` before calling the fix done.
-- Package the staged binary as a new checksum-pinned `file://` tarball under
-  `~/.local/share/knowbox/packages/`. Increment the formula's Homebrew revision if the CLI version
-  is unchanged. Dry-run `brew install --skip-link --formula giang/local/knowbox` first, then install
-  only that formula with auto-update, installed-dependent checks, and install cleanup disabled.
-- Keep `~/.local/bin/knowbox` pointing to Homebrew's stable `opt` path. Check that it resolves to
-  the new keg and matches the packaged binary, then smoke-test it against a disposable KB.
-  Leave the live KB, its Git history, and scheduled callers unchanged. Report any install blocker.
 
 ## Dependencies
 - Add with `cargo add <crate>`; it fails on an unknown crate or feature. Never hand-edit a version.

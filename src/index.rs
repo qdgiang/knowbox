@@ -5,13 +5,12 @@ use std::fs;
 use std::io::{self, Read};
 use std::path::PathBuf;
 
-use anyhow::Context;
 use rusqlite::{Connection, ErrorCode, OpenFlags, params};
 use thiserror::Error;
 
 use crate::config::KbRoot;
 use crate::notes::{self, NoteEntry};
-use crate::store::{self, WriteLock};
+use crate::store::{self, Inventory, WriteLock};
 pub(crate) use render::ref_names;
 
 // Keep the stored CREATE statements compatible with Python-built databases.
@@ -28,11 +27,12 @@ const TABLES: [(&str, &str); 4] = [
         "kb_d",
         "CREATE VIRTUAL TABLE kb_d USING fts5(id UNINDEXED, path UNINDEXED, title, typ, domain, tags, aliases, triggers, summary, body)",
     ),
-    (
-        "kb_meta",
-        "CREATE TABLE kb_meta (path TEXT PRIMARY KEY, sha1 TEXT, bytes INTEGER NOT NULL)",
-    ),
+    META,
 ];
+const META: (&str, &str) = (
+    "kb_meta",
+    "CREATE TABLE kb_meta (path TEXT PRIMARY KEY, sha1 TEXT, bytes INTEGER NOT NULL)",
+);
 
 #[derive(Debug, Error)]
 pub(crate) enum IndexError {
@@ -57,9 +57,9 @@ struct Snapshot {
 }
 
 impl Snapshot {
-    fn read(root: &KbRoot) -> Result<Self, IndexError> {
-        let notes = notes::snapshot(root)?;
-        let (index, count) = render::render(&notes, &ref_names(root)?);
+    fn read(root: &KbRoot, policy: &mut Inventory<'_>) -> Result<Self, IndexError> {
+        let notes = notes::snapshot_with(root, policy)?;
+        let (index, count) = render::render(&notes, &ref_names(root, policy)?);
         Ok(Self {
             notes,
             index,
@@ -150,23 +150,24 @@ fn guard_sidecars(root: &KbRoot) -> Result<(), IndexError> {
 
 /// Regenerate both derived artifacts from one snapshot; return the index.md note count.
 pub(crate) fn rebuild(lock: &WriteLock) -> Result<usize, IndexError> {
-    let snapshot = Snapshot::read(lock.root())?;
+    let snapshot = Snapshot::read(lock.root(), &mut Inventory::Strict)?;
     snapshot.publish(lock)?;
     Ok(snapshot.count)
 }
 
-fn manifest_drift(db: &Connection, notes: &[NoteEntry]) -> rusqlite::Result<Option<Vec<String>>> {
-    // A database predating kb_d is rebuilt once rather than serving degraded results.
+type Manifest = BTreeMap<String, (String, i64)>;
+
+fn read_manifest(db: &Connection, required: &[(&str, &str)]) -> rusqlite::Result<Option<Manifest>> {
     let mut schema = db.prepare(
         "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name=? AND sql=?)",
     )?;
-    for (name, ddl) in TABLES {
+    for &(name, ddl) in required {
         if !schema.query_row([name, ddl], |r| r.get::<_, bool>(0))? {
             return Ok(None);
         }
     }
     let mut meta = db.prepare("SELECT path, sha1, bytes FROM kb_meta")?;
-    let mut stored = meta
+    let stored = meta
         .query_map([], |row| {
             Ok((
                 row.get::<_, String>(0)?,
@@ -174,6 +175,43 @@ fn manifest_drift(db: &Connection, notes: &[NoteEntry]) -> rusqlite::Result<Opti
             ))
         })?
         .collect::<rusqlite::Result<BTreeMap<_, _>>>()?;
+    Ok(Some(stored))
+}
+
+/// The last published fingerprints are evidence for a legacy root's initial audit baseline.
+pub(crate) fn previous_hashes(
+    root: &KbRoot,
+) -> Result<Option<BTreeMap<String, String>>, IndexError> {
+    let Some(db) = open_reader(root)? else {
+        return Ok(None);
+    };
+    let stored = match read_manifest(&db, &[META]) {
+        Err(error) if corrupt(&error) => return Ok(None),
+        result => result?,
+    };
+    Ok(stored.and_then(|stored| {
+        stored
+            .into_iter()
+            .map(|(path, (hash, bytes))| {
+                let name = path.strip_prefix("notes/")?;
+                (bytes >= 0
+                    && name.ends_with(".md")
+                    && !name.contains(['/', '\0'])
+                    && hash.len() == 40
+                    && hash
+                        .bytes()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)))
+                .then_some((path, hash))
+            })
+            .collect()
+    }))
+}
+
+fn manifest_drift(db: &Connection, notes: &[NoteEntry]) -> rusqlite::Result<Option<Vec<String>>> {
+    // A database predating kb_d is rebuilt once rather than serving degraded results.
+    let Some(mut stored) = read_manifest(db, &TABLES)? else {
+        return Ok(None);
+    };
     let mut drifted = Vec::new();
     for entry in notes {
         if !stored.remove(&entry.relative).is_some_and(|(hash, bytes)| {
@@ -284,7 +322,17 @@ pub(crate) struct Freshness {
     pub(crate) index_drift: bool,
 }
 
-pub(crate) fn freshness(root: &KbRoot, notes: &[NoteEntry]) -> Result<Freshness, IndexError> {
+impl Freshness {
+    pub(crate) fn is_current(&self) -> bool {
+        !self.db_missing && !self.index_drift && self.drifted.is_empty() && self.orphans.is_empty()
+    }
+}
+
+pub(crate) fn freshness(
+    root: &KbRoot,
+    notes: &[NoteEntry],
+    policy: &mut Inventory<'_>,
+) -> Result<Freshness, IndexError> {
     let mut report = Freshness::default();
     if let Some(db) = open_reader(root)?
         && let Some(drifted) = check_manifest(&db, notes)?
@@ -318,35 +366,65 @@ pub(crate) fn freshness(root: &KbRoot, notes: &[NoteEntry]) -> Result<Freshness,
         .into_iter()
         .collect();
     if report.drifted.is_empty() && report.orphans.is_empty() {
-        let (expected, _) = render::render(notes, &ref_names(root)?);
+        let (expected, _) = render::render(notes, &ref_names(root, policy)?);
         report.index_drift = bytes != expected.as_bytes();
     }
     Ok(report)
 }
 
-/// Read on the same connection that passed freshness. On drift, recheck under lock
-/// before publishing, and retry at most once. No reader handle survives a swap.
+#[derive(Clone, Copy)]
+pub(crate) enum StalePolicy {
+    TemporarySnapshot,
+    Report,
+}
+
+pub(crate) enum IndexRead<T> {
+    Current(T),
+    Temporary(T),
+    Stale,
+}
+
+/// Run the query on the connection that passed freshness, or apply the requested stale policy.
 pub(crate) fn with_current<T>(
     root: &KbRoot,
+    policy: &mut Inventory<'_>,
+    stale: StalePolicy,
     query: impl Fn(&Connection, &[NoteEntry]) -> rusqlite::Result<T>,
-) -> anyhow::Result<(T, bool)> {
-    if let Some(result) = checked(root, &Snapshot::read(root)?, &query)? {
-        return Ok((result, false));
-    }
-    let lock = WriteLock::acquire(root)?;
-    let snapshot = Snapshot::read(root)?;
+) -> Result<IndexRead<T>, IndexError> {
+    let snapshot = Snapshot::read(root, policy)?;
     if let Some(result) = checked(root, &snapshot, &query)? {
-        return Ok((result, false));
+        return Ok(IndexRead::Current(result));
     }
-    snapshot.publish(&lock)?;
-    let result = checked(root, &snapshot, &query)?
-        .context("index is still stale after rebuild — run 'knowbox reindex'")?;
-    Ok((result, true))
+    if matches!(stale, StalePolicy::Report) {
+        return Ok(IndexRead::Stale);
+    }
+    let mut db = Connection::open_in_memory()?;
+    populate(&mut db, &snapshot.notes)?;
+    Ok(IndexRead::Temporary(query(&db, &snapshot.notes)?))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stale_read_only_index_skips_query_and_private_rebuild() -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        fs::create_dir(directory.path().join("notes"))?;
+        let root = KbRoot::open(directory.path())?;
+        let result = with_current(
+            &root,
+            &mut Inventory::Strict,
+            StalePolicy::Report,
+            |_, _| -> rusqlite::Result<()> { Err(rusqlite::Error::InvalidQuery) },
+        )?;
+        assert!(matches!(result, IndexRead::Stale));
+        let paths: Vec<_> = fs::read_dir(directory.path())?
+            .map(|entry| entry.map(|entry| entry.file_name()))
+            .collect::<io::Result<_>>()?;
+        assert_eq!(paths, [std::ffi::OsStr::new("notes")]);
+        Ok(())
+    }
 
     #[test]
     fn old_schema_requires_rebuild() -> rusqlite::Result<()> {

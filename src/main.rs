@@ -3,30 +3,49 @@ mod changes;
 mod cli;
 mod config;
 mod git;
+mod history;
 mod index;
 mod init;
+mod journal;
 mod maintain;
 mod notes;
 mod search;
 mod semantic;
+mod serve;
 mod store;
+mod usage;
 mod write_cli;
 
-use std::fs;
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::process::ExitCode;
 
 use anyhow::{Context, Result, bail};
-use jiff::Zoned;
+use jiff::{Span, Zoned};
 
+use crate::changes::mutation::Action;
 use crate::cli::Command;
 use crate::config::{KbRoot, RootError};
+use crate::journal::Actor;
 use crate::notes::LookupError;
+use crate::store::{Inventory, InventoryWarning, InventoryWarnings};
+use crate::usage::{Layer, ReadEvent};
+
+// Cargo uses a three-component package version. Releases use only major and minor.
+const VERSION: &str = concat!(
+    env!("CARGO_PKG_VERSION_MAJOR"),
+    ".",
+    env!("CARGO_PKG_VERSION_MINOR")
+);
 
 fn main() -> ExitCode {
     let mut out = io::stdout().lock();
     let mut err = io::stderr().lock();
-    let result = execute(&mut out, &mut err).and_then(|code| {
+    let mut warnings = InventoryWarnings::default();
+    let result = execute(&mut Inventory::Read(&mut warnings), &mut out, &mut err);
+    if warnings.report(&mut err).is_err() {
+        return ExitCode::FAILURE;
+    }
+    let result = result.and_then(|code| {
         out.flush().context("flushing stdout")?;
         Ok(code)
     });
@@ -50,9 +69,17 @@ fn main() -> ExitCode {
     }
 }
 
-fn execute(out: &mut impl Write, err: &mut impl Write) -> Result<ExitCode> {
-    let command = match cli::parse() {
-        Ok(command) => command,
+fn execute(
+    read: &mut Inventory<'_>,
+    out: &mut impl Write,
+    err: &mut impl Write,
+) -> Result<ExitCode> {
+    let cli::Cli {
+        command,
+        client,
+        no_write,
+    } = match cli::parse() {
+        Ok(cli) => cli,
         Err(diagnostic) => {
             let code = if diagnostic.use_stderr() {
                 write!(err, "{diagnostic}")?;
@@ -64,72 +91,409 @@ fn execute(out: &mut impl Write, err: &mut impl Write) -> Result<ExitCode> {
             return Ok(code);
         }
     };
+    if no_write && command.writes() {
+        writeln!(err, "knowbox: --no-write requires a read command")?;
+        return Ok(ExitCode::from(2));
+    }
+    let actor = || Actor::resolve(client.as_deref(), "cli");
     match command {
-        Command::Version => writeln!(out, "{}", env!("CARGO_PKG_VERSION"))?,
-        Command::Init { dir, no_git } => {
-            if std::env::var_os("KNOWBOX_ROOT").is_some() {
-                KbRoot::resolve()?;
+        Command::Version => writeln!(out, "{VERSION}")?,
+        Command::Context {
+            project,
+            host,
+            explain,
+            json,
+        } => {
+            let root = KbRoot::resolve(read)?;
+            let mode = if explain {
+                browse::ContextMode::Explain
+            } else {
+                browse::ContextMode::Brief
+            };
+            let report = browse::context(&root, &project, &host, Zoned::now().date(), mode, read)?;
+            if json {
+                write_json(&report, read, out)?;
+            } else {
+                report.render(out)?;
             }
+        }
+        Command::Map {
+            project_misses,
+            json,
+        } => {
+            let root = KbRoot::resolve(read)?;
+            let mode = if project_misses {
+                semantic::MissProjection::Provider
+            } else {
+                semantic::MissProjection::Offline
+            };
+            let report = semantic::map_report(&root, mode, read)?;
+            if json {
+                write_json(&report, read, out)?;
+            } else {
+                report.render(out)?;
+            }
+        }
+        Command::Metrics { json } => {
+            let report = maintain::metrics::report(&KbRoot::resolve(read)?)?;
+            if json {
+                write_json(&report, read, out)?;
+            } else {
+                report.render(out)?;
+            }
+        }
+        Command::Init { dir, no_git } => {
+            KbRoot::validate_init_override()?;
             let dir = match dir {
                 Some(dir) => dir,
                 None => config::default_root()?,
             };
-            write_cli::init(&dir, no_git, out, err)?;
+            write_cli::init(&dir, no_git, &actor()?, out, err)?;
         }
-        Command::Reindex => write_cli::reindex(&KbRoot::resolve()?, out, err)?,
-        Command::Search { query, expand } => {
-            let root = KbRoot::resolve()?;
-            search::run(
+        Command::Reindex => write_cli::reindex(
+            &KbRoot::resolve(&mut Inventory::Strict)?,
+            &actor()?,
+            out,
+            err,
+        )?,
+        Command::Search {
+            query,
+            expand,
+            local,
+            no_fix,
+            json,
+        } => {
+            let root = KbRoot::resolve(read)?;
+            let now = Zoned::now();
+            let query = query.join(" ");
+            let report = search::run(
                 &root,
-                &query.join(" "),
-                expand,
-                Zoned::now().datetime(),
-                out,
-                err,
+                &query,
+                search::Options {
+                    expand,
+                    local,
+                    no_fix,
+                    no_write,
+                },
+                now.date(),
+                read,
             )?;
+            if json {
+                write_json(&report, read, out)?;
+            } else {
+                report.render(out, err)?;
+            }
+            if !no_write && let Some(event) = report.read_event() {
+                let actor = actor();
+                if matches!(
+                    event,
+                    ReadEvent::Search {
+                        layer: Layer::Miss,
+                        ..
+                    }
+                ) && let Err(error) =
+                    search::log_miss(&root, &query, now.datetime(), actor.as_ref().ok())
+                {
+                    writeln!(
+                        err,
+                        "knowbox search: warning: could not record search miss: {error:#}"
+                    )?;
+                }
+                record_usage(&root, &now, actor, &event, err)?;
+            }
+            if matches!(report, search::SearchResult::StaleIndex { .. }) {
+                return Ok(ExitCode::FAILURE);
+            }
         }
-        Command::Show { id_or_slug } => show(&KbRoot::resolve()?, &id_or_slug, out, err)?,
-        Command::Expand { id_or_slug, depth } => {
-            browse::expand(&KbRoot::resolve()?, &id_or_slug, depth, out)?;
+        Command::Show {
+            id_or_slug,
+            path,
+            json,
+        } => {
+            let root = KbRoot::resolve(read)?;
+            let detail = if path {
+                notes::read_detail_path(&root, &id_or_slug, read)?
+            } else {
+                notes::read_detail(&root, &id_or_slug, read)?
+            };
+            if json {
+                write_json(&detail, read, out)?;
+            } else {
+                detail.render(out, err)?;
+            }
+            if !no_write && let Some(note) = detail.id {
+                record_usage(
+                    &root,
+                    &Zoned::now(),
+                    actor(),
+                    &ReadEvent::Show { note },
+                    err,
+                )?;
+            }
         }
-        Command::List { domain, kind } => {
-            browse::list(&KbRoot::resolve()?, domain.as_deref(), kind.as_deref(), out)?;
+        Command::Expand {
+            id_or_slug,
+            depth,
+            json,
+        } => {
+            let root = KbRoot::resolve(read)?;
+            let report = browse::expand(&root, &id_or_slug, depth, read)?;
+            if json {
+                write_json(&report, read, out)?;
+            } else {
+                report.render(out)?;
+            }
+            if !no_write {
+                record_usage(
+                    &root,
+                    &Zoned::now(),
+                    actor(),
+                    &ReadEvent::Expand {
+                        notes: report.displayed_ids(),
+                    },
+                    err,
+                )?;
+            }
+        }
+        Command::Graph { json } => {
+            let report = browse::graph(&KbRoot::resolve(read)?, read)?;
+            if json {
+                write_json(&report, read, out)?;
+            } else {
+                report.render(out)?;
+            }
+        }
+        Command::History { id_or_slug, json } => {
+            let report = history::read(&KbRoot::resolve(read)?, &id_or_slug, read)?;
+            if json {
+                write_json(&report, read, out)?;
+            } else {
+                report.render(out)?;
+            }
+        }
+        Command::Timeline { json } => {
+            let report = history::timeline(&KbRoot::resolve(read)?, read)?;
+            if json {
+                write_json(&report, read, out)?;
+            } else {
+                report.render(out)?;
+            }
+        }
+        Command::Status { json } => {
+            let report = git::status(&KbRoot::resolve(read)?)?;
+            if json {
+                write_json(&report, read, out)?;
+            } else {
+                report.render(out)?;
+            }
+        }
+        Command::Serve(mut options) => {
+            options.read_only |= no_write;
+            let root = KbRoot::resolve(read)?;
+            serve::run(&root, &options, client.as_deref(), out, err)?;
+        }
+        Command::List { domain, kind, json } => {
+            let report = browse::list(
+                &KbRoot::resolve(read)?,
+                domain.as_deref(),
+                kind.as_deref(),
+                read,
+            )?;
+            if json {
+                write_json(&report, read, out)?;
+            } else {
+                report.render(out)?;
+            }
         }
         Command::Recent {
             limit,
             here,
             project,
+            json,
         } => {
-            let root = KbRoot::resolve()?;
+            let root = KbRoot::resolve(read)?;
             let project = match project.filter(|s| !s.is_empty()) {
                 None if here => {
                     Some(browse::project_from_cwd().context("detecting current project")?)
                 }
                 project => project,
             };
-            browse::recent(&root, limit, project.as_deref(), out)?;
+            let report = browse::recent(&root, limit, project.as_deref(), read)?;
+            if json {
+                write_json(&report, read, out)?;
+            } else {
+                report.render(out)?;
+            }
         }
-        Command::Refs { filter } => browse::refs(&KbRoot::resolve()?, &filter.join(" "), out)?,
-        Command::Stale { days } => {
-            browse::stale(&KbRoot::resolve()?, days, Zoned::now().date(), out)?
+        Command::Refs { filter, json } => {
+            let report = browse::refs(&KbRoot::resolve(read)?, &filter.join(" "), read)?;
+            if json {
+                write_json(&report, read, out)?;
+            } else {
+                report.render(out)?;
+            }
         }
-        Command::Churn { days } => git::churn(&KbRoot::resolve()?, days, out)?,
-        Command::New(args) => write_cli::create(&KbRoot::resolve()?, *args, out, err)?,
-        Command::NextId => writeln!(out, "{}", changes::next_id(&KbRoot::resolve()?)?)?,
-        Command::Touch { id_or_slug } => write_cli::touch(&KbRoot::resolve()?, &id_or_slug, out)?,
+        Command::Stale { days, json } => {
+            let report = browse::stale(&KbRoot::resolve(read)?, days, Zoned::now().date(), read)?;
+            if json {
+                write_json(&report, read, out)?;
+            } else {
+                report.render(out)?;
+            }
+        }
+        Command::Churn { days } => git::churn(&KbRoot::resolve(read)?, days, read, out)?,
+        Command::New(args) => write_cli::create(
+            &KbRoot::resolve(&mut Inventory::Strict)?,
+            *args,
+            &actor()?,
+            out,
+            err,
+        )?,
+        Command::Edit(args) => write_cli::edit(
+            &KbRoot::resolve(&mut Inventory::Strict)?,
+            args,
+            &actor()?,
+            out,
+            err,
+        )?,
+        Command::Link { a, b, request_id } => {
+            let root = KbRoot::resolve(&mut Inventory::Strict)?;
+            write_cli::mutate(
+                &root,
+                Action::Link { a, b },
+                request_id.as_deref(),
+                &actor()?,
+            )?
+            .render(&root, out, err)?;
+        }
+        Command::Verdict {
+            a,
+            b,
+            verdict,
+            reason,
+            link,
+            winner,
+            request_id,
+        } => {
+            let root = KbRoot::resolve(&mut Inventory::Strict)?;
+            write_cli::mutate(
+                &root,
+                Action::Verdict {
+                    a,
+                    b,
+                    verdict,
+                    reason,
+                    link,
+                    winner,
+                    bases: None,
+                },
+                request_id.as_deref(),
+                &actor()?,
+            )?
+            .render(&root, out, err)?;
+        }
+        Command::NextId => writeln!(out, "{}", changes::next_id(&KbRoot::resolve(read)?)?)?,
+        Command::Touch { id_or_slug } => write_cli::touch(
+            &KbRoot::resolve(&mut Inventory::Strict)?,
+            &id_or_slug,
+            &actor()?,
+            out,
+        )?,
         Command::Verify { ids, evidence } => {
-            write_cli::verify(&KbRoot::resolve()?, &ids, &evidence, out, err)?;
+            write_cli::verify(
+                &KbRoot::resolve(&mut Inventory::Strict)?,
+                &ids,
+                &evidence,
+                &actor()?,
+                out,
+                err,
+            )?;
         }
-        Command::Supersede { old, with } => {
-            write_cli::supersede(&KbRoot::resolve()?, &old, &with, out, err)?;
+        Command::Supersede { old, with, reason } => {
+            write_cli::supersede(
+                &KbRoot::resolve(&mut Inventory::Strict)?,
+                &old,
+                &with,
+                reason.as_deref(),
+                &actor()?,
+                out,
+                err,
+            )?;
         }
-        Command::Sweep => write_cli::sweep(&KbRoot::resolve()?, err)?,
-        Command::Lint => {
-            if maintain::lint(&KbRoot::resolve()?, out)? {
+        Command::Sweep => write_cli::sweep(
+            &KbRoot::resolve(&mut Inventory::Strict)?,
+            &Actor::resolve(client.as_deref(), "sweep")?,
+            err,
+        )?,
+        Command::Lint {
+            file,
+            stdin,
+            against,
+            json,
+        } => {
+            let root = KbRoot::resolve(read)?;
+            let report = if file.is_some() || stdin {
+                let bytes = match file.as_deref() {
+                    Some(path) if path.as_os_str() != "-" => std::fs::read(path)
+                        .with_context(|| format!("reading draft {}", path.display()))?,
+                    _ => {
+                        let mut bytes = Vec::new();
+                        io::stdin()
+                            .lock()
+                            .read_to_end(&mut bytes)
+                            .context("reading draft from stdin")?;
+                        bytes
+                    }
+                };
+                let relative = against
+                    .as_deref()
+                    .map(|selector| {
+                        let path = notes::find_for_write(&root, selector)?
+                            .with_context(|| format!("not found: {selector}"))?;
+                        let name = path
+                            .file_name()
+                            .and_then(|name| name.to_str())
+                            .context("note filename is not UTF-8")?;
+                        Ok::<_, anyhow::Error>(format!("notes/{name}"))
+                    })
+                    .transpose()?;
+                let target = relative.as_deref().map_or(
+                    maintain::DraftTarget::Standalone,
+                    maintain::DraftTarget::Replace,
+                );
+                maintain::lint_draft(&root, target, &bytes, read)?
+            } else {
+                maintain::lint(&root, maintain::HeartbeatCheck::from_env(), read)?
+            };
+            if json {
+                write_json(&report, read, out)?;
+            } else {
+                report.render(out)?;
+            }
+            if report.has_errors() {
                 return Ok(ExitCode::FAILURE);
             }
         }
-        Command::RawBacklog => maintain::raw_backlog(&KbRoot::resolve()?, out)?,
+        Command::Usage { days, rollup } => {
+            let root = KbRoot::resolve(read)?;
+            let today = Zoned::now().date();
+            let since = days
+                .map(|days| today.checked_sub(Span::new().try_days(i64::from(days) - 1)?))
+                .transpose()
+                .context("usage period starts outside the supported date range")?;
+            if rollup {
+                usage::rollup(&root, today)?;
+            }
+            usage::report(&root, since.map(|start| start..=today), out)?;
+        }
+        Command::RawBacklog { json } => {
+            let report = maintain::raw_backlog(&KbRoot::resolve(read)?, read)?;
+            if json {
+                write_json(&report, read, out)?;
+            } else {
+                report.render(out)?;
+            }
+        }
         Command::RawMark {
             file,
             number,
@@ -141,15 +505,23 @@ fn execute(out: &mut impl Write, err: &mut impl Write) -> Result<ExitCode> {
                 (None, Some(reason)) => maintain::Mark::Rejected(reason),
                 _ => bail!("raw-mark requires exactly one of --note or --rejected"),
             };
-            write_cli::raw_mark(&KbRoot::resolve()?, &file, number, mark, out, err)?;
+            write_cli::raw_mark(
+                &KbRoot::resolve(&mut Inventory::Strict)?,
+                &file,
+                number,
+                mark,
+                &actor()?,
+                out,
+                err,
+            )?;
         }
         Command::Embed { force } => {
-            let root = KbRoot::resolve()?;
+            let root = KbRoot::resolve(&mut Inventory::Strict)?;
             writeln!(out, "{}", semantic::embed(&root, force)?)?;
         }
         Command::Vsearch { query } => {
-            let root = KbRoot::resolve()?;
-            let hits = semantic::vsearch(&root, &query.join(" "))?;
+            let root = KbRoot::resolve(read)?;
+            let hits = semantic::vsearch(&root, &query.join(" "), read)?;
             if hits.is_empty() {
                 writeln!(out, "no semantic matches.")?;
             }
@@ -162,34 +534,61 @@ fn execute(out: &mut impl Write, err: &mut impl Write) -> Result<ExitCode> {
             }
         }
         Command::Conflicts { top, min_cos, json } => {
-            let root = KbRoot::resolve()?;
+            let root = KbRoot::resolve(read)?;
             if !(-1.0..=1.0).contains(&min_cos) {
                 bail!("--min-cos must be between -1 and 1");
             }
-            semantic::conflicts(&root, usize::try_from(top)?, min_cos, json, out)?;
+            semantic::conflicts(&root, usize::try_from(top)?, min_cos, json, read, out)?;
         }
     }
     Ok(ExitCode::SUCCESS)
 }
 
-fn show(root: &KbRoot, selector: &str, out: &mut impl Write, err: &mut impl Write) -> Result<()> {
-    let Some(path) = notes::find(root, selector)? else {
-        bail!("not found: {selector}");
-    };
-    let bytes = fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
-    let text = std::str::from_utf8(&bytes)
-        .with_context(|| format!("decoding {} as UTF-8", path.display()))?;
-    if let Ok(note) = notes::parse(&bytes) {
-        let verified = note.text("verified", "");
-        let updated = note.text("updated", "");
-        if !verified.is_empty() && updated > verified {
-            writeln!(
-                err,
-                "knowbox show: WARNING edited after last verification (updated {updated} > verified {verified}) — content changed since it was last confirmed; re-verify before relying on it"
-            )?;
-        }
+fn write_json<T: serde::Serialize>(
+    result: &T,
+    read: &mut Inventory<'_>,
+    out: &mut impl Write,
+) -> Result<()> {
+    #[derive(serde::Serialize)]
+    struct Report<'a, T> {
+        #[serde(flatten)]
+        data: &'a T,
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        inventory_warnings: Vec<InventoryWarning>,
     }
-    // Match Python's text-mode read plus print, without reserializing frontmatter.
-    writeln!(out, "{}", notes::normalize_newlines(text))?;
+    serde_json::to_writer(
+        &mut *out,
+        &Report {
+            data: result,
+            inventory_warnings: read.take_json_warnings(),
+        },
+    )?;
+    writeln!(out)?;
+    Ok(())
+}
+
+fn record_usage(
+    root: &KbRoot,
+    now: &Zoned,
+    actor: Result<Actor>,
+    event: &ReadEvent,
+    err: &mut impl Write,
+) -> std::io::Result<()> {
+    if let Err(error) = actor.and_then(|actor| {
+        usage::record(
+            root,
+            &usage::Context {
+                now,
+                client: actor.client(),
+                session: actor.session(),
+            },
+            event,
+        )
+    }) {
+        writeln!(
+            err,
+            "knowbox: warning: could not record local usage: {error:#}"
+        )?;
+    }
     Ok(())
 }

@@ -1,5 +1,6 @@
 mod cache;
 mod conflicts;
+mod map;
 mod provider;
 mod rank;
 
@@ -13,10 +14,12 @@ use jiff::civil::Date;
 
 use crate::config::KbRoot;
 use crate::notes::{self, Note, NoteEntry};
-use crate::store::WriteLock;
+use crate::search::Hit;
+use crate::store::{Inventory, WriteLock};
 
 use cache::{Cache, CacheError, StoredVector, read_cache, required_cache};
-pub(crate) use conflicts::conflicts;
+pub(crate) use conflicts::{conflict_report, conflicts};
+pub(crate) use map::{MissProjection, map_report};
 use provider::Provider;
 
 const INTERACTIVE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -31,24 +34,15 @@ pub(crate) struct SemanticHit {
     pub(crate) score: f64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct RankedHit {
-    pub(crate) id: String,
-    pub(crate) path: String,
-    pub(crate) title: String,
-    pub(crate) snippet: String,
-    pub(crate) semantic_only: bool,
-}
-
 #[derive(Debug)]
 pub(crate) struct Fusion {
-    pub(crate) rows: Vec<RankedHit>,
+    pub(crate) rows: Vec<Hit>,
     pub(crate) changed: bool,
     pub(crate) recency_changed: bool,
 }
 
 impl Fusion {
-    fn unchanged(lexical: &[RankedHit]) -> Self {
+    fn unchanged(lexical: &[Hit]) -> Self {
         Self {
             rows: lexical.to_vec(),
             changed: false,
@@ -244,6 +238,7 @@ fn query_cache(
     cache: Cache,
     timeout: Duration,
     limit: usize,
+    policy: &mut Inventory<'_>,
 ) -> Result<Query> {
     let provider = Provider::from_env(&cache.model, timeout)?;
     let vector = provider
@@ -256,7 +251,7 @@ fn query_cache(
         "query and cached vectors have different dimensions; run `knowbox embed --force`"
     );
     let vector = rank::normalize(vector);
-    let entries = notes::snapshot(root)?;
+    let entries = notes::snapshot_with(root, policy)?;
     let live = live_notes(&entries);
     let mut hits: Vec<_> = cache
         .notes
@@ -276,18 +271,27 @@ fn query_cache(
     Ok(Query { entries, hits })
 }
 
-pub(crate) fn vsearch(root: &KbRoot, query: &str) -> Result<Vec<SemanticHit>> {
+pub(crate) fn vsearch(
+    root: &KbRoot,
+    query: &str,
+    policy: &mut Inventory<'_>,
+) -> Result<Vec<SemanticHit>> {
     let cache = required_cache(root, &provider::model())?;
-    Ok(query_cache(root, query, cache, EXPLICIT_TIMEOUT, rank::DISPLAY)?.hits)
+    Ok(query_cache(root, query, cache, EXPLICIT_TIMEOUT, rank::DISPLAY, policy)?.hits)
 }
 
-fn interactive_query(root: &KbRoot, query: &str, limit: usize) -> Result<Query> {
+fn interactive_query(
+    root: &KbRoot,
+    query: &str,
+    limit: usize,
+    policy: &mut Inventory<'_>,
+) -> Result<Query> {
     let cache = required_cache(root, &provider::model())?;
-    query_cache(root, query, cache, INTERACTIVE_TIMEOUT, limit)
+    query_cache(root, query, cache, INTERACTIVE_TIMEOUT, limit, policy)
 }
 
-pub(crate) fn rescue(root: &KbRoot, query: &str) -> Vec<SemanticHit> {
-    match interactive_query(root, query, 3) {
+pub(crate) fn rescue(root: &KbRoot, query: &str, policy: &mut Inventory<'_>) -> Vec<SemanticHit> {
+    match interactive_query(root, query, 3, policy) {
         Ok(result) => result
             .hits
             .into_iter()
@@ -298,9 +302,15 @@ pub(crate) fn rescue(root: &KbRoot, query: &str) -> Vec<SemanticHit> {
     }
 }
 
-pub(crate) fn fuse(query: &str, lexical: &[RankedHit], root: &KbRoot, now: Date) -> Fusion {
+pub(crate) fn fuse(
+    query: &str,
+    lexical: &[Hit],
+    root: &KbRoot,
+    now: Date,
+    policy: &mut Inventory<'_>,
+) -> Fusion {
     if !setting_enabled("KNOWBOX_NO_FUSION")
-        && let Ok(result) = interactive_query(root, query, rank::DISPLAY)
+        && let Ok(result) = interactive_query(root, query, rank::DISPLAY, policy)
     {
         return rank::fuse_rows(
             lexical,

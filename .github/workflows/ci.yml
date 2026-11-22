@@ -25,6 +25,9 @@ jobs:
       - run: cargo test --workspace --locked
         env:
           INSTA_UPDATE: 'no'
+          GIT_CONFIG_COUNT: '1'
+          GIT_CONFIG_KEY_0: advice.detachedHead
+          GIT_CONFIG_VALUE_0: 'false'
   dependencies:
     name: Dependency policy
     runs-on: ubuntu-latest

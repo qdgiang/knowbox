@@ -1,6 +1,10 @@
+mod inventory;
+
+pub(crate) use inventory::{EntryKind, Inventory, InventoryWarning, InventoryWarnings};
+
 use std::env;
 use std::fs::{self, File, Metadata, TryLockError};
-use std::io::{self, Write};
+use std::io::{self, BufRead, Read, Write};
 use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -54,6 +58,14 @@ impl Drop for WriteLock {
 
 impl WriteLock {
     pub(crate) fn acquire(root: &KbRoot) -> Result<Self, StoreError> {
+        Self::acquire_with_timeout(root, lock_timeout())
+    }
+
+    pub(crate) fn try_acquire(root: &KbRoot) -> Result<Self, StoreError> {
+        Self::acquire_with_timeout(root, Duration::ZERO)
+    }
+
+    fn acquire_with_timeout(root: &KbRoot, timeout: Duration) -> Result<Self, StoreError> {
         let path = root.path().join(LOCK_NAME);
         regular_file(&path).map_err(|source| StoreError::Io {
             action: "checking lock file",
@@ -71,7 +83,7 @@ impl WriteLock {
                 path: path.clone(),
                 source,
             })?;
-        Self::lock(root.clone(), handle, path, lock_timeout())
+        Self::lock(root.clone(), handle, path, timeout)
     }
 
     // Never adopt an existing lock during init: even a lock-only directory is nonempty.
@@ -141,42 +153,38 @@ fn parse_timeout(value: &str) -> Duration {
 
 // lstat, not stat. On Windows a junction (and some other redirects) is a
 // reparse point even when the standard FileType doesn't classify it as a symlink.
-fn metadata(path: &Path) -> io::Result<Option<Metadata>> {
+fn symlink_metadata(path: &Path) -> io::Result<Option<Metadata>> {
     // Strip trailing separators and `/.`: on Unix either would force lstat to follow the leaf.
     let clean: PathBuf = path.components().collect();
-    let meta = match fs::symlink_metadata(clean) {
-        Ok(meta) => meta,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(e),
-    };
-    #[cfg(windows)]
-    let redirected = {
-        use std::os::windows::fs::MetadataExt;
-        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
-        meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
-    };
-    #[cfg(not(windows))]
-    let redirected = meta.is_symlink();
-    if redirected {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("refusing symbolic link or reparse point {}", path.display()),
-        ));
+    match fs::symlink_metadata(clean) {
+        Ok(meta) => Ok(Some(meta)),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e),
     }
-    Ok(Some(meta))
 }
 
-fn file_metadata(path: &Path) -> io::Result<Option<Metadata>> {
-    let meta = metadata(path)?;
-    if let Some(meta) = &meta
-        && !meta.is_file()
-    {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("not a regular file: {}", path.display()),
-        ));
-    }
-    Ok(meta)
+#[cfg(windows)]
+fn redirected(meta: &Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+    meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
+#[cfg(not(windows))]
+fn redirected(meta: &Metadata) -> bool {
+    meta.is_symlink()
+}
+
+fn redirect_error(path: &Path) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidInput,
+        format!("refusing symbolic link or reparse point {path:?}"),
+    )
+}
+
+pub(crate) fn file_metadata(path: &Path) -> io::Result<Option<Metadata>> {
+    Inventory::Strict.file_metadata(path)
 }
 
 pub(crate) fn regular_file(path: &Path) -> io::Result<bool> {
@@ -184,14 +192,189 @@ pub(crate) fn regular_file(path: &Path) -> io::Result<bool> {
 }
 
 pub(crate) fn directory(path: &Path) -> io::Result<bool> {
-    match metadata(path)? {
-        None => Ok(false),
-        Some(meta) if meta.is_dir() => Ok(true),
-        Some(_) => Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("not a directory: {}", path.display()),
-        )),
+    Inventory::Strict.directory(path)
+}
+
+#[cfg(windows)]
+pub(crate) fn open_directory_for_child(path: &Path) -> io::Result<File> {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    const FILE_SHARE_READ_WRITE: u32 = 0x3;
+    // Exclude FILE_SHARE_DELETE to hold the directory in place during the child open.
+    let handle = File::options()
+        .read(true)
+        .share_mode(FILE_SHARE_READ_WRITE)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)?;
+    let metadata = handle.metadata()?;
+    if redirected(&metadata) || !metadata.is_dir() {
+        return Err(redirect_error(path));
     }
+    Ok(handle)
+}
+
+pub(crate) fn open_read(path: &Path) -> io::Result<File> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| io::Error::other("missing file parent"))?;
+    #[cfg(unix)]
+    let file = {
+        use rustix::fs::{Mode, OFlags, open, openat};
+
+        let name = path
+            .file_name()
+            .ok_or_else(|| io::Error::other("missing filename"))?;
+        let directory = open(
+            parent,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )?;
+        File::from(openat(
+            directory,
+            name,
+            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+            Mode::empty(),
+        )?)
+    };
+    #[cfg(windows)]
+    let file = {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+        let _directory = open_directory_for_child(parent)?;
+        File::options()
+            .read(true)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(path)?
+    };
+    let metadata = file.metadata()?;
+    if redirected(&metadata) || !metadata.is_file() {
+        return Err(redirect_error(path));
+    }
+    Ok(file)
+}
+
+pub(crate) fn read_regular(path: &Path) -> io::Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    open_read(path)?.read_to_end(&mut bytes)?;
+    Ok(bytes)
+}
+
+pub(crate) fn append_record(path: &Path, record: &[u8]) -> io::Result<()> {
+    let mut file = open_log(path, LogAccess::Append)?;
+    write_record(&mut file, record)
+}
+
+pub(crate) fn write_record(file: &mut File, record: &[u8]) -> io::Result<()> {
+    // A retry of a partial write could interleave two records.
+    if file.write(record)? != record.len() {
+        return Err(io::Error::new(
+            io::ErrorKind::WriteZero,
+            "incomplete append",
+        ));
+    }
+    Ok(())
+}
+
+enum LogAccess {
+    Read,
+    Append,
+}
+
+/// Open an existing local log and enforce the same link and file-type rules as the writer.
+pub(crate) fn read_log(path: &Path) -> io::Result<File> {
+    open_log(path, LogAccess::Read)
+}
+
+// Report the consumed length of a complete frame. An oversized frame has an empty body.
+pub(crate) fn read_complete_record(
+    reader: &mut impl BufRead,
+    row: &mut Vec<u8>,
+    max_length: usize,
+    mut observe: impl FnMut(&[u8]),
+) -> io::Result<Option<u64>> {
+    row.clear();
+    let mut bytes = 0_u64;
+    loop {
+        let chunk = reader.fill_buf()?;
+        if chunk.is_empty() {
+            return Ok(None);
+        }
+        let delimiter = chunk.iter().position(|byte| *byte == b'\n');
+        let consumed = delimiter.map_or(chunk.len(), |i| i + 1);
+        bytes += u64::try_from(consumed).map_err(io::Error::other)?;
+        observe(&chunk[..consumed]);
+        if row.len() <= max_length {
+            let amount = consumed.min(max_length + 1 - row.len());
+            row.extend_from_slice(&chunk[..amount]);
+        }
+        reader.consume(consumed);
+        if delimiter.is_some() {
+            if row.len() > max_length {
+                row.clear();
+            }
+            return Ok(Some(bytes));
+        }
+    }
+}
+
+#[cfg(unix)]
+fn open_log(path: &Path, access: LogAccess) -> io::Result<File> {
+    use std::os::unix::fs::MetadataExt;
+
+    use rustix::fs::{Mode, OFlags, open};
+
+    let flags = match access {
+        LogAccess::Read => OFlags::RDONLY,
+        LogAccess::Append => OFlags::WRONLY | OFlags::CREATE | OFlags::APPEND,
+    };
+    let file = File::from(open(
+        path,
+        flags | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+        Mode::RUSR | Mode::WUSR,
+    )?);
+    let metadata = file.metadata()?;
+    if !metadata.is_file() || metadata.nlink() != 1 {
+        return Err(invalid_log_target(path));
+    }
+    Ok(file)
+}
+
+#[cfg(windows)]
+fn open_log(path: &Path, access: LogAccess) -> io::Result<File> {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    const FILE_ATTRIBUTE_DIRECTORY: u64 = 0x10;
+    const FILE_ATTRIBUTE_REPARSE_POINT: u64 = 0x400;
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    let mut options = fs::OpenOptions::new();
+    match access {
+        LogAccess::Read => options.read(true),
+        LogAccess::Append => options.append(true).create(true),
+    };
+    let file = options
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)?;
+    let info = winapi_util::file::information(&file)?;
+    if info.file_attributes() & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT) != 0
+        || info.number_of_links() != 1
+        || !winapi_util::file::typ(&file)?.is_disk()
+    {
+        return Err(invalid_log_target(path));
+    }
+    Ok(file)
+}
+
+fn invalid_log_target(path: &Path) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidInput,
+        format!(
+            "expected a regular file with a single link at {}",
+            path.display()
+        ),
+    )
 }
 
 fn parent_dir(path: &Path) -> io::Result<&Path> {

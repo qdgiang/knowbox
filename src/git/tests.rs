@@ -9,12 +9,51 @@ fn lock(root: &Path) -> Result<WriteLock> {
     Ok(WriteLock::acquire(&KbRoot::open(root)?)?)
 }
 
+fn commit(repo: &GitRepo<'_>, subject: Option<&str>) -> Result<CommitOutcome, GitError> {
+    let stamp = crate::journal::test_stamp();
+    repo.commit(Commit {
+        subject,
+        actor: stamp.actor,
+    })
+}
+
 fn seeded(lock: &WriteLock) -> Result<GitRepo<'_>> {
     let repo = init(lock)?;
     fs::create_dir(repo.root.path().join("notes"))?;
     fs::write(repo.root.path().join("log.md"), b"initial\n")?;
-    assert_eq!(repo.commit(Some("init"))?.push_warning, None);
+    assert_eq!(commit(&repo, Some("init"))?.push.warning(), None);
     Ok(repo)
+}
+
+#[test]
+fn sweep_commit_keeps_supersede_reason_from_previously_published_journal() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let lock = lock(dir.path())?;
+    let repo = seeded(&lock)?;
+    let stamp = crate::journal::test_stamp();
+    crate::changes::append_entry(
+        &lock,
+        &stamp,
+        "supersede",
+        "kb-0001",
+        "superseded by kb-0002 | reason=old statement | corrected",
+    )?;
+    let actor = Actor::new("sweep", "other-host", None)?;
+    assert_eq!(
+        repo.commit(Commit {
+            subject: None,
+            actor: &actor
+        })?
+        .push
+        .warning(),
+        None
+    );
+    let message = git(dir.path(), &["log", "-1", "--format=%b"])?;
+    assert_eq!(
+        std::str::from_utf8(&message)?.trim(),
+        "Knowbox-Client: sweep\nKnowbox-Host: other-host\nKnowbox-Supersede-Reason: old statement | corrected",
+    );
+    Ok(())
 }
 
 #[test]
@@ -31,7 +70,7 @@ fn refuses_any_existing_staging_without_touching_index_or_head() -> Result<()> {
         let index = fs::read(root.join(".git/index"))?;
         assert!(matches!(preflight(&lock), Err(GitError::Staged)));
         // Also catch staging by a human after the original preflight.
-        assert!(matches!(repo.commit(None), Err(GitError::Staged)));
+        assert!(matches!(commit(&repo, None), Err(GitError::Staged)));
         assert_eq!(fs::read(root.join(".git/index"))?, index);
         assert_eq!(git(root, &["rev-parse", "HEAD"])?, head);
         assert_eq!(fs::read(root.join(path))?, b"working bytes differ\n");
@@ -118,7 +157,7 @@ fn accepts_real_linked_worktree_but_not_copied_gitfile() -> Result<()> {
     let linked = lock(&wt)?;
     let repo = preflight(&linked)?.context("linked repo missing")?;
     fs::write(wt.join("log.md"), b"edited in linked\n")?;
-    assert_eq!(repo.commit(None)?.push_warning, None);
+    assert_eq!(commit(&repo, None)?.push.warning(), None);
     assert_eq!(git(&main, &["show", "HEAD:log.md"])?, b"initial\n");
     assert_eq!(git(&wt, &["show", "HEAD:log.md"])?, b"edited in linked\n");
     let fake = dir.path().join("fake");
@@ -159,14 +198,14 @@ fn soft_failed_push_is_retried_on_clean_sweep_to_exact_upstream() -> Result<()> 
     git(&root, &["remote", "set-url", "archive", "../offline.git"])?;
     fs::write(root.join("notes/kb-0024-x.md"), b"edited\n")?;
     assert!(
-        matches!(repo.commit(None)?.push_warning.as_deref(), Some(text) if text.starts_with("push failed (offline?): git push failed"))
+        matches!(commit(&repo, None)?.push.warning(), Some(text) if text.starts_with("push failed (offline?): git push failed"))
     );
     let local = git(&root, &["rev-parse", "HEAD"])?;
     assert_ne!(local, initial);
     assert_eq!(git(&bare, &["rev-parse", "refs/heads/backup"])?, initial);
     assert!(!repo.tracked_dirty()?);
     git(&root, &["remote", "set-url", "archive", "../remote.git"])?;
-    assert_eq!(repo.commit(None)?.push_warning, None);
+    assert_eq!(commit(&repo, None)?.push.warning(), None);
     assert_eq!(git(&root, &["rev-parse", "HEAD"])?, local);
     assert_eq!(git(&bare, &["rev-parse", "refs/heads/backup"])?, local);
     assert_eq!(
@@ -193,7 +232,7 @@ fn no_upstream_warns_without_guessing_branch_or_remote() -> Result<()> {
     git(&root, &["remote", "add", "origin", "../remote.git"])?;
     fs::write(root.join("log.md"), b"committed only locally\n")?;
     assert_eq!(
-        repo.commit(None)?.push_warning.as_deref(),
+        commit(&repo, None)?.push.warning(),
         Some(
             "push failed (offline?): no configured remote branch upstream; no new local commit is needed to retry"
         )
@@ -213,14 +252,14 @@ fn hard_commit_failure_preserves_index_and_working_tree() -> Result<()> {
     git(root, &["config", "user.name", ""])?;
     fs::remove_file(root.join("log.md"))?;
     assert!(matches!(
-        repo.commit(None),
+        commit(&repo, None),
         Err(GitError::Failed { op: "commit", .. })
     ));
     assert_eq!(git(root, &["rev-parse", "HEAD"])?, before);
     assert_eq!(fs::read(root.join(".git/index"))?, index);
     assert!(!exists(&root.join(".git/index.lock"))?);
     git(root, &["config", "user.name", "kb"])?;
-    assert_eq!(repo.commit(None)?.push_warning, None);
+    assert_eq!(commit(&repo, None)?.push.warning(), None);
     assert_eq!(git(root, &["ls-tree", "--name-only", "HEAD"])?, b"");
     Ok(())
 }
@@ -240,7 +279,7 @@ fn untracked_toplevel_and_subjects_match_managed_scope() -> Result<()> {
         fs::write(root.join(name).join("x.md"), b"data\n")?;
     }
     assert_eq!(untracked_toplevel(repo.root)?, ["other"]);
-    assert_eq!(repo.commit(None)?.push_warning, None);
+    assert_eq!(commit(&repo, None)?.push.warning(), None);
     assert_eq!(
         git(root, &["log", "-1", "--format=%s"])?,
         "knowbox: sweep — kb-1111, raw/x.md\n".as_bytes()
@@ -274,21 +313,26 @@ fn churn_counts_content_not_date_stamps_or_renames() -> Result<()> {
         &original,
         b"---\nid: kb-0123\ntitle: churn title\nverified: 2026-01-01\n---\nbody\n",
     )?;
-    repo.commit(None)?;
+    commit(&repo, None)?;
     fs::rename(&original, &renamed)?;
-    repo.commit(None)?;
+    commit(&repo, None)?;
     fs::write(
         &renamed,
         fs::read_to_string(&renamed)?.replace("2026-01-01", "2026-02-01"),
     )?;
-    repo.commit(None)?;
+    commit(&repo, None)?;
     fs::write(
         &renamed,
         fs::read_to_string(&renamed)?.replace("body", "-- new body"),
     )?;
-    repo.commit(None)?;
+    commit(&repo, None)?;
     let mut out = Vec::new();
-    churn(repo.root, 90, &mut out)?;
+    churn(
+        repo.root,
+        90,
+        &mut crate::store::Inventory::Strict,
+        &mut out,
+    )?;
     let actual = String::from_utf8(out)?;
     let mut lines = actual.lines();
     assert_eq!(
@@ -321,15 +365,13 @@ fn refuses_environment_redirects() {
         "GIT_INDEX_FILE",
         "GIT_OBJECT_DIRECTORY",
         "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-        "GIT_CONFIG_COUNT",
-        "GIT_CONFIG_KEY_0",
-        "GIT_CONFIG_VALUE_0",
-        "GIT_CONFIG_PARAMETERS",
-        "GIT_CONFIG_SYSTEM",
-        "GIT_CONFIG_GLOBAL",
-        "GIT_CONFIG",
     ] {
         assert!(forbidden_env(var), "{var}");
     }
-    assert!(!forbidden_env("GIT_CONFIG_NOSYSTEM"));
+    for var in ["GIT_CONFIG_NOSYSTEM", "GIT_CONFIG_COUNT"] {
+        assert!(
+            !forbidden_env(var),
+            "{var} should be scrubbed by process::command"
+        );
+    }
 }

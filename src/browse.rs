@@ -1,18 +1,28 @@
+mod context;
 mod graph;
+mod refs;
 mod reports;
 
 use std::borrow::Cow;
 use std::cmp::Reverse;
+use std::collections::BTreeMap;
 use std::env;
 use std::fs;
 use std::io::{self, Write};
 use std::path::Path;
 
-use crate::config::KbRoot;
-use crate::notes::{self, Note, NoteEntry};
+use serde::Serialize;
 
-pub(crate) use graph::{Depth, expand, search_expansion};
-pub(crate) use reports::{parse_date, refs, stale};
+use crate::config::KbRoot;
+use crate::notes::{self, Note, NoteEntry, NoteValue};
+use crate::store::Inventory;
+
+pub(crate) use context::{ContextMode, context};
+pub(crate) use graph::{
+    Depth, SearchNeighbor, authored_edges, expand, graph, render_search_expansion, search_expansion,
+};
+pub(crate) use refs::{ref_section, refs};
+pub(crate) use reports::{parse_date, stale};
 
 fn parsed_notes(entries: &[NoteEntry]) -> impl Iterator<Item = (&str, &Note)> {
     entries.iter().filter_map(|entry| match &entry.parsed {
@@ -64,19 +74,37 @@ fn quoted(value: &str) -> String {
     result
 }
 
+#[derive(Debug, Serialize)]
+pub(crate) struct NoteList {
+    notes: Vec<ListRow>,
+}
+
+#[derive(Debug, Serialize)]
+struct ListRow {
+    path: String,
+    id: String,
+    title: String,
+    domain: String,
+    #[serde(rename = "type")]
+    kind: String,
+    frontmatter: BTreeMap<String, NoteValue>,
+}
+
 /// List notes in inventory order, optionally filtered by domain and type.
 pub(crate) fn list(
     root: &KbRoot,
     domain: Option<&str>,
     kind: Option<&str>,
-    out: &mut impl Write,
-) -> anyhow::Result<()> {
-    let entries = notes::snapshot(root)?;
+    policy: &mut Inventory<'_>,
+) -> anyhow::Result<NoteList> {
+    let entries = notes::snapshot_with(root, policy)?;
     let domain = domain
         .filter(|domain| !domain.is_empty())
         .map(str::to_lowercase);
     let kind = kind.filter(|kind| !kind.is_empty());
-    for (_, note) in parsed_notes(&entries) {
+    let mut notes = Vec::new();
+    for entry in entries {
+        let Ok(note) = entry.parsed else { continue };
         if domain
             .as_ref()
             .is_some_and(|filter| *filter != note.text("domain", "").to_lowercase())
@@ -84,21 +112,46 @@ pub(crate) fn list(
         {
             continue;
         }
-        let id = note.text("id", "?");
-        let kind = note.text("type", "?");
-        let domain = note.text("domain", "?");
-        let title = note.text("title", "?");
-        writeln!(out, "{id:8} [{kind:9}] {domain:12} {title}")?;
+        notes.push(ListRow {
+            path: entry.relative,
+            id: note.text("id", "?").into_owned(),
+            title: note.text("title", "?").into_owned(),
+            kind: note.text("type", "?").into_owned(),
+            domain: note.text("domain", "?").into_owned(),
+            frontmatter: note.meta,
+        });
     }
-    Ok(())
+    Ok(NoteList { notes })
 }
 
-struct Session<'a> {
-    path: &'a str,
-    note: &'a Note,
-    id: Cow<'a, str>,
-    project: Cow<'a, str>,
-    created: Cow<'a, str>,
+impl NoteList {
+    pub(crate) fn render(&self, out: &mut impl Write) -> anyhow::Result<()> {
+        for note in &self.notes {
+            writeln!(
+                out,
+                "{:8} [{:9}] {:12} {}",
+                note.id, note.kind, note.domain, note.title
+            )?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct Recent {
+    project: Option<String>,
+    total: usize,
+    sessions: Vec<Session>,
+}
+
+#[derive(Debug, Serialize)]
+struct Session {
+    path: String,
+    id: String,
+    project: String,
+    created: String,
+    title: String,
+    summary: String,
 }
 
 /// List sessions newest first, breaking date ties by descending ID.
@@ -106,10 +159,10 @@ pub(crate) fn recent(
     root: &KbRoot,
     limit: usize,
     project: Option<&str>,
-    out: &mut impl Write,
-) -> anyhow::Result<()> {
+    policy: &mut Inventory<'_>,
+) -> anyhow::Result<Recent> {
     let project = project.filter(|project| !project.is_empty());
-    let entries = notes::snapshot(root)?;
+    let entries = notes::snapshot_with(root, policy)?;
     let mut sessions: Vec<_> = parsed_notes(&entries)
         .filter_map(|(path, note)| {
             if note.scalar("type") != Some("session") {
@@ -120,45 +173,58 @@ pub(crate) fn recent(
                 return None;
             }
             Some(Session {
-                path,
-                note,
-                id: note.text("id", "?"),
-                project: name,
-                created: note.text("created", ""),
+                path: path.to_owned(),
+                id: note.text("id", "?").into_owned(),
+                project: name.into_owned(),
+                created: note.text("created", "").into_owned(),
+                title: display_list(note, "title").into_owned(),
+                summary: display_list(note, "summary").into_owned(),
             })
         })
         .collect();
-    if sessions.is_empty() {
-        let scope =
-            project.map_or_else(String::new, |name| format!(" for project {}", quoted(name)));
-        writeln!(
-            out,
-            "no session notes{scope} yet. Save one on request: knowbox new --type session --domain sessions --title \"<date> <topic>\" (template: SCHEMA.md 'Session notes')"
-        )?;
-        return Ok(());
-    }
     sessions.sort_by(|a, b| Reverse((&a.created, &a.id)).cmp(&Reverse((&b.created, &b.id))));
-    let scope = project.map_or_else(
-        || " (all projects)".to_owned(),
-        |name| format!(" (project: {name})"),
-    );
-    writeln!(out, "knowbox recent — newest session notes first{scope}")?;
-    for Session {
-        path,
-        note,
-        id,
-        project,
-        created,
-    } in sessions.into_iter().take(limit)
-    {
-        writeln!(
-            out,
-            "{id}  {created}  [{project}]  {}\n    {}\n    {path}",
-            display_list(note, "title"),
-            display_list(note, "summary")
-        )?;
+    let total = sessions.len();
+    sessions.truncate(limit);
+    Ok(Recent {
+        project: project.map(str::to_owned),
+        total,
+        sessions,
+    })
+}
+
+impl Recent {
+    pub(crate) fn render(&self, out: &mut impl Write) -> anyhow::Result<()> {
+        let project = self.project.as_deref();
+        if self.total == 0 {
+            let scope =
+                project.map_or_else(String::new, |name| format!(" for project {}", quoted(name)));
+            writeln!(
+                out,
+                "no session notes{scope} yet. Save one on request: knowbox new --type session --domain sessions --title \"<date> <topic>\" (template: SCHEMA.md 'Session notes')"
+            )?;
+            return Ok(());
+        }
+        let scope = project.map_or_else(
+            || " (all projects)".to_owned(),
+            |name| format!(" (project: {name})"),
+        );
+        writeln!(out, "knowbox recent — newest session notes first{scope}")?;
+        for Session {
+            id,
+            created,
+            project,
+            title,
+            summary,
+            path,
+        } in &self.sessions
+        {
+            writeln!(
+                out,
+                "{id}  {created}  [{project}]  {title}\n    {summary}\n    {path}"
+            )?;
+        }
+        Ok(())
     }
-    Ok(())
 }
 
 /// The nearest repository basename, or the current directory basename outside Git.
@@ -215,7 +281,7 @@ mod tests {
         for (file, text) in [
             (
                 "a.md",
-                "---\nid: kb-9999\ntitle: First\ndomain: NiÑo\ntype: fact\n---",
+                "---\nid: kb-9999\ntitle: First\ndomain: NiÑo\ntype: fact\nsource: [refs/a.md, refs/b.md]\n---",
             ),
             (
                 "b.md",
@@ -227,7 +293,14 @@ mod tests {
             fs::write(root.path().join("notes").join(file), text)?;
         }
         let mut output = Vec::new();
-        list(&root, Some("NIÑO"), Some("fact"), &mut output)?;
+        let result = list(&root, Some("NIÑO"), Some("fact"), &mut Inventory::Strict)?;
+        let json = serde_json::to_value(&result)?;
+        assert_eq!(json["notes"][0]["path"], "notes/a.md");
+        assert_eq!(
+            json["notes"][0]["frontmatter"]["source"],
+            serde_json::json!(["refs/a.md", "refs/b.md"])
+        );
+        result.render(&mut output)?;
         assert_eq!(
             String::from_utf8(output)?,
             concat!(
@@ -254,7 +327,7 @@ mod tests {
             )?;
         }
         let mut output = Vec::new();
-        recent(&root, 1, Some("app"), &mut output)?;
+        recent(&root, 1, Some("app"), &mut Inventory::Strict)?.render(&mut output)?;
         assert_eq!(
             String::from_utf8(output)?,
             concat!(

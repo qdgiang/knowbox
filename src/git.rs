@@ -1,5 +1,7 @@
 mod churn;
+pub(crate) mod history;
 mod process;
+mod status;
 #[cfg(test)]
 mod tests;
 
@@ -14,9 +16,11 @@ use tempfile::{NamedTempFile, TempPath};
 use thiserror::Error;
 
 use crate::config::KbRoot;
+use crate::journal::{self, Actor};
 use crate::store::{WriteLock, directory, regular_file};
 pub(crate) use churn::churn;
 use process::{Output, command, run};
+pub(crate) use status::status;
 
 const MANAGED: [&str; 9] = [
     "notes",
@@ -70,38 +74,61 @@ pub(crate) struct GitRepo<'a> {
 
 #[derive(Debug)]
 pub(crate) struct CommitOutcome {
-    pub(crate) push_warning: Option<String>,
+    pub(crate) committed: bool,
+    pub(crate) push: PushOutcome,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub(crate) enum PushOutcome {
+    NoRemote,
+    UpToDate,
+    Pushed,
+    Failed { warning: String },
+}
+
+impl PushOutcome {
+    pub(crate) fn warning(&self) -> Option<&str> {
+        match self {
+            Self::Failed { warning } => Some(warning),
+            Self::NoRemote | Self::UpToDate | Self::Pushed => None,
+        }
+    }
+}
+
+pub(crate) struct Commit<'a> {
+    pub(crate) subject: Option<&'a str>,
+    pub(crate) actor: &'a Actor,
 }
 
 fn forbidden_env(name: &str) -> bool {
-    (name.starts_with("GIT_CONFIG") && name != "GIT_CONFIG_NOSYSTEM")
-        || matches!(
-            name,
-            "GIT_DIR"
-                | "GIT_COMMON_DIR"
-                | "GIT_WORK_TREE"
-                | "GIT_IMPLICIT_WORK_TREE"
-                | "GIT_INDEX_FILE"
-                | "GIT_OBJECT_DIRECTORY"
-                | "GIT_ALTERNATE_OBJECT_DIRECTORIES"
-                | "GIT_QUARANTINE_PATH"
-                | "GIT_SHALLOW_FILE"
-                | "GIT_GRAFT_FILE"
-                | "GIT_REPLACE_REF_BASE"
-                | "GIT_NAMESPACE"
-                | "GIT_ATTR_SOURCE"
-                | "GIT_ATTR_SYSTEM"
-                | "GIT_EXEC_PATH"
-                | "GIT_TEMPLATE_DIR"
-                | "GIT_ICASE_PATHSPECS"
-                | "GIT_GLOB_PATHSPECS"
-                | "GIT_NOGLOB_PATHSPECS"
-                | "GIT_CEILING_DIRECTORIES"
-                | "GIT_DISCOVERY_ACROSS_FILESYSTEM"
-                | "GIT_SUPER_PREFIX"
-                | "GIT_PREFIX"
-                | "GIT_INTERNAL_SUPER_PREFIX"
-        )
+    matches!(
+        name,
+        "GIT_DIR"
+            | "GIT_COMMON_DIR"
+            | "GIT_WORK_TREE"
+            | "GIT_IMPLICIT_WORK_TREE"
+            | "GIT_INDEX_FILE"
+            | "GIT_OBJECT_DIRECTORY"
+            | "GIT_ALTERNATE_OBJECT_DIRECTORIES"
+            | "GIT_QUARANTINE_PATH"
+            | "GIT_SHALLOW_FILE"
+            | "GIT_GRAFT_FILE"
+            | "GIT_REPLACE_REF_BASE"
+            | "GIT_NAMESPACE"
+            | "GIT_ATTR_SOURCE"
+            | "GIT_ATTR_SYSTEM"
+            | "GIT_EXEC_PATH"
+            | "GIT_TEMPLATE_DIR"
+            | "GIT_ICASE_PATHSPECS"
+            | "GIT_GLOB_PATHSPECS"
+            | "GIT_NOGLOB_PATHSPECS"
+            | "GIT_CEILING_DIRECTORIES"
+            | "GIT_DISCOVERY_ACROSS_FILESYSTEM"
+            | "GIT_SUPER_PREFIX"
+            | "GIT_PREFIX"
+            | "GIT_INTERNAL_SUPER_PREFIX"
+    )
 }
 
 fn check_vars() -> Result<(), GitError> {
@@ -315,21 +342,52 @@ impl GitRepo<'_> {
         Ok(!self.managed_status()?.is_empty())
     }
 
-    pub(crate) fn commit(&self, subject: Option<&str>) -> Result<CommitOutcome, GitError> {
+    pub(crate) fn commit(&self, intent: Commit<'_>) -> Result<CommitOutcome, GitError> {
         if !discover(self.root)?.is_some_and(|current| current.admin == self.admin) {
             return Err(GitError::Invalid(
                 "KB Git repository changed since preflight",
             ));
         }
         self.guard()?;
-        let changed = self.tracked_dirty()? && self.local_commit(subject)?;
-        let push_warning = self.push(changed).err().map(|e| {
-            format!("push failed (offline?): {e}; no new local commit is needed to retry")
-        });
-        Ok(CommitOutcome { push_warning })
+        let changed = self.tracked_dirty()? && self.local_commit(intent)?;
+        Ok(CommitOutcome {
+            committed: changed,
+            push: self.push_outcome(changed),
+        })
     }
 
-    fn local_commit(&self, subject: Option<&str>) -> Result<bool, GitError> {
+    pub(crate) fn has_log_line(&self, line: &str) -> Result<bool, GitError> {
+        if self
+            .exec("rev-parse", &["--verify", "-q", "HEAD"])?
+            .optional()?
+            .is_none()
+            || self
+                .exec("ls-tree", &["HEAD", "--", "log.md"])?
+                .checked()?
+                .is_empty()
+        {
+            return Ok(false);
+        }
+        let bytes = self.exec("show", &["HEAD:log.md"])?.checked()?;
+        Ok(bytes
+            .split(|byte| *byte == b'\n')
+            .any(|value| value.strip_suffix(b"\r").unwrap_or(value) == line.as_bytes()))
+    }
+
+    pub(crate) fn retry_push(&self) -> PushOutcome {
+        self.push_outcome(false)
+    }
+
+    fn push_outcome(&self, changed: bool) -> PushOutcome {
+        self.push(changed)
+            .unwrap_or_else(|error| PushOutcome::Failed {
+                warning: format!(
+                    "push failed (offline?): {error}; no new local commit is needed to retry"
+                ),
+            })
+    }
+
+    fn local_commit(&self, intent: Commit<'_>) -> Result<bool, GitError> {
         let index = self.admin.join("index");
         let reservation = self.admin.join("index.lock");
         let file = File::create_new(&reservation).map_err(|err| {
@@ -401,7 +459,31 @@ impl GitRepo<'_> {
         let head = self
             .exec("rev-parse", &["--verify", "-q", "HEAD"])?
             .optional()?;
-        let message = commit_subject(subject, head.is_some(), &names);
+        let subject = commit_subject(intent.subject, head.is_some(), &names);
+        let journal_diff = if names.split(|byte| *byte == 0).any(|path| path == b"log.md") {
+            private(
+                "diff",
+                &[
+                    "--cached",
+                    "--no-ext-diff",
+                    "--no-textconv",
+                    "--no-color",
+                    "--text",
+                    "--unified=0",
+                    "--",
+                    "log.md",
+                ],
+            )?
+        } else {
+            Vec::new()
+        };
+        // A sweep can publish a supersede recovered from an interrupted writer.
+        let diff = String::from_utf8_lossy(&journal_diff);
+        let reasons: Vec<_> = diff
+            .lines()
+            .filter_map(|line| journal::supersede_reason(line.strip_prefix('+')?))
+            .collect();
+        let message = intent.actor.commit_message(&subject, &reasons);
         let mut commit = git_cmd(self.root);
         commit
             .env("GIT_INDEX_FILE", &*reserved)
@@ -419,9 +501,9 @@ impl GitRepo<'_> {
         Ok(true)
     }
 
-    fn push(&self, changed: bool) -> Result<(), GitError> {
+    fn push(&self, changed: bool) -> Result<PushOutcome, GitError> {
         if self.exec("remote", &[])?.checked()?.is_empty() {
-            return Ok(());
+            return Ok(PushOutcome::NoRemote);
         }
         let branch = self
             .exec("symbolic-ref", &["-q", "HEAD"])?
@@ -468,7 +550,7 @@ impl GitRepo<'_> {
                 .checked()?
                 .is_empty()
             {
-                return Ok(());
+                return Ok(PushOutcome::UpToDate);
             }
         }
         let mirror_off = format!("remote.{remote}.mirror=false");
@@ -489,7 +571,7 @@ impl GitRepo<'_> {
             "push",
         )?
         .checked()?;
-        Ok(())
+        Ok(PushOutcome::Pushed)
     }
 }
 
@@ -537,18 +619,18 @@ pub(crate) fn untracked_toplevel(root: &KbRoot) -> Result<Vec<String>, GitError>
     let Some(repo) = discover(root)? else {
         return Ok(Vec::new());
     };
-    let data = repo
-        .exec(
+    let data = run(
+        history::read_cmd(&repo).args([
             "ls-files",
-            &[
-                "--others",
-                "--exclude-standard",
-                "--directory",
-                "--no-empty-directory",
-                "-z",
-            ],
-        )?
-        .checked()?;
+            "--others",
+            "--exclude-standard",
+            "--directory",
+            "--no-empty-directory",
+            "-z",
+        ]),
+        "ls-files",
+    )?
+    .checked()?;
     Ok(String::from_utf8_lossy(&data)
         .split('\0')
         .map(|s| s.trim_end_matches('/'))

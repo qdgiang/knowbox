@@ -1,0 +1,110 @@
+name: Release
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ['v[0-9]+.[0-9]+']
+
+permissions:
+  contents: read
+
+jobs:
+  dependencies:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
+          arguments: --workspace --locked
+
+  package:
+    name: Package (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            format: tar.gz
+            exe: knowbox
+          - runner: macos-15
+            target: aarch64-apple-darwin
+            format: tar.gz
+            exe: knowbox
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+            format: tar.gz
+            exe: knowbox
+          - runner: windows-2025
+            target: x86_64-pc-windows-msvc
+            format: zip
+            exe: knowbox.exe
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    env:
+      RELEASE_TARGET: ${{ matrix.target }}
+      PACKAGE_FORMAT: ${{ matrix.format }}
+      BINARY_NAME: ${{ matrix.exe }}
+      CARGO_TARGET_DIR: target
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: cargo test --workspace --locked
+        env:
+          INSTA_UPDATE: 'no'
+          GIT_CONFIG_COUNT: '1'
+          GIT_CONFIG_KEY_0: advice.detachedHead
+          GIT_CONFIG_VALUE_0: 'false'
+      - run: cargo build --locked --release --bin knowbox --target "$RELEASE_TARGET"
+        shell: bash
+      - name: Package and smoke-test
+        shell: bash
+        run: |
+          tag=''
+          if [[ "$GITHUB_EVENT_NAME" == push && "$GITHUB_REF_TYPE" == tag ]]; then
+            tag="$GITHUB_REF_NAME"
+          fi
+          bash scripts/package-release.sh "$CARGO_TARGET_DIR/$RELEASE_TARGET/release/$BINARY_NAME" "$RELEASE_TARGET" "$PACKAGE_FORMAT" dist "$tag"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: knowbox-${{ matrix.target }}
+          path: dist/knowbox-*.${{ matrix.format }}
+          compression-level: 0
+          if-no-files-found: error
+
+  publish:
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    needs: [dependencies, package]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: knowbox-*
+          path: dist
+          merge-multiple: true
+      - name: Publish verified release assets
+        shell: bash
+        working-directory: dist
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          tag="$GITHUB_REF_NAME"
+          assets=(
+            "knowbox-$tag-x86_64-unknown-linux-gnu.tar.gz"
+            "knowbox-$tag-aarch64-apple-darwin.tar.gz"
+            "knowbox-$tag-x86_64-apple-darwin.tar.gz"
+            "knowbox-$tag-x86_64-pc-windows-msvc.zip"
+          )
+          sha256sum -- "${assets[@]}" > SHA256SUMS
+          gh release create "$tag" "${assets[@]}" SHA256SUMS --verify-tag --generate-notes

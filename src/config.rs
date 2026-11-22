@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 
-use crate::store::{LOCK_NAME, directory, regular_file};
+use crate::store::{Inventory, LOCK_NAME, directory, regular_file};
 
 pub(crate) const SUBDIRS: [&str; 3] = ["notes", "refs", "raw"];
 
@@ -33,32 +33,51 @@ pub(crate) enum RootError {
 pub(crate) struct KbRoot(PathBuf);
 
 impl KbRoot {
-    pub(crate) fn resolve() -> Result<Self, RootError> {
+    pub(crate) fn resolve(inventory: &mut Inventory<'_>) -> Result<Self, RootError> {
         if let Some(path) = env::var_os("KNOWBOX_ROOT") {
-            return Self::from_override(&path);
+            return Self::from_override(&path, inventory)?
+                .require_notes()
+                .map_err(|source| RootError::InvalidOverride {
+                    path: path.into(),
+                    source: Box::new(source),
+                });
         }
-        let root = Self::open(&default_root()?)?;
-        let notes = root.path().join("notes");
+        Self::open_with(&default_root()?, inventory)?.require_notes()
+    }
+
+    pub(crate) fn validate_init_override() -> Result<(), RootError> {
+        if let Some(path) = env::var_os("KNOWBOX_ROOT") {
+            Self::from_override(&path, &mut Inventory::Strict)?;
+        }
+        Ok(())
+    }
+
+    fn require_notes(self) -> Result<Self, RootError> {
+        let notes = self.path().join("notes");
         if !directory(&notes).map_err(|source| RootError::Inspect {
             path: notes,
             source,
         })? {
-            return Err(RootError::NoNotes(root.0));
+            return Err(RootError::NoNotes(self.0));
         }
-        Ok(root)
+        Ok(self)
     }
 
-    fn from_override(path: &OsStr) -> Result<Self, RootError> {
+    fn from_override(path: &OsStr, inventory: &mut Inventory<'_>) -> Result<Self, RootError> {
         if path.to_str().is_some_and(|s| s.trim().is_empty()) {
             return Err(RootError::BlankOverride);
         }
-        Self::open(Path::new(path)).map_err(|source| RootError::InvalidOverride {
+        Self::open_with(Path::new(path), inventory).map_err(|source| RootError::InvalidOverride {
             path: path.into(),
             source: Box::new(source),
         })
     }
 
     pub(crate) fn open(path: &Path) -> Result<Self, RootError> {
+        Self::open_with(path, &mut Inventory::Strict)
+    }
+
+    fn open_with(path: &Path, inventory: &mut Inventory<'_>) -> Result<Self, RootError> {
         let inspect = |source| RootError::Inspect {
             path: path.into(),
             source,
@@ -67,9 +86,19 @@ impl KbRoot {
             return Err(RootError::Missing(path.into()));
         }
         let path = path.canonicalize().map_err(inspect)?;
-        for sub in SUBDIRS {
-            let path = path.join(sub);
-            directory(&path).map_err(|source| RootError::Inspect { path, source })?;
+        let notes = path.join("notes");
+        directory(&notes).map_err(|source| RootError::Inspect {
+            path: notes,
+            source,
+        })?;
+        for sub in ["refs", "raw"] {
+            let child = path.join(sub);
+            inventory
+                .directory(&child)
+                .map_err(|source| RootError::Inspect {
+                    path: child,
+                    source,
+                })?;
         }
         let lock = path.join(LOCK_NAME);
         regular_file(&lock).map_err(|source| RootError::Inspect { path: lock, source })?;
@@ -96,13 +125,13 @@ mod tests {
     fn blank_override_never_selects_default() {
         for path in ["", " \t\n"] {
             assert!(matches!(
-                KbRoot::from_override(OsStr::new(path)),
+                KbRoot::from_override(OsStr::new(path), &mut Inventory::Strict),
                 Err(RootError::BlankOverride)
             ));
         }
     }
 
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     #[test]
     fn override_preserves_native_path() -> anyhow::Result<()> {
         use std::os::unix::ffi::OsStrExt;
@@ -110,7 +139,7 @@ mod tests {
         let native = dir.path().join(OsStr::from_bytes(b" kb\xff "));
         std::fs::create_dir(&native)?;
         assert_eq!(
-            KbRoot::from_override(native.as_os_str())?.path(),
+            KbRoot::from_override(native.as_os_str(), &mut Inventory::Strict)?.path(),
             native.canonicalize()?
         );
         Ok(())

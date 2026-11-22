@@ -1,14 +1,16 @@
-use std::borrow::Cow;
 use std::cmp::Ordering;
-use std::collections::BinaryHeap;
+use std::collections::{BTreeSet, BinaryHeap};
 use std::io::Write;
 
-use anyhow::bail;
+use anyhow::{Context, Result};
 use serde::Serialize;
 
 use crate::config::KbRoot;
-use crate::notes::{self, Note};
+use crate::maintain::{RawEvidence, raw_evidence};
+use crate::notes::{self, Note, NoteEntry};
+use crate::store::Inventory;
 
+use super::cache::Cache;
 use super::rank::{cosine, normalize};
 use super::{live_notes, provider, required_cache};
 
@@ -50,10 +52,18 @@ impl PartialEq for Pair {
 
 impl Eq for Pair {}
 
-fn best_pairs(embedded: &[Embedded<'_>], top: usize, min_cos: f64) -> Vec<Pair> {
+fn best_pairs(
+    embedded: &[Embedded<'_>],
+    top: usize,
+    min_cos: f64,
+    judged: &BTreeSet<[&str; 2]>,
+) -> Vec<Pair> {
     let mut pairs = BinaryHeap::new();
     for (a, first) in embedded.iter().enumerate() {
         for (b, second) in embedded.iter().enumerate().skip(a + 1) {
+            if judged.contains(&[first.id, second.id]) {
+                continue;
+            }
             let score = cosine(&first.vector, &second.vector);
             if score < min_cos {
                 continue;
@@ -71,17 +81,27 @@ fn best_pairs(embedded: &[Embedded<'_>], top: usize, min_cos: f64) -> Vec<Pair> 
     pairs.into_sorted_vec()
 }
 
-#[derive(Serialize)]
-struct JsonPair<'a> {
-    a: &'a str,
-    b: &'a str,
+#[derive(Debug, Serialize)]
+pub(crate) struct Candidate {
+    a: String,
+    b: String,
     cos: f64,
-    a_status: Cow<'a, str>,
-    b_status: Cow<'a, str>,
-    a_updated: Cow<'a, str>,
-    b_updated: Cow<'a, str>,
-    a_summary: Cow<'a, str>,
-    b_summary: Cow<'a, str>,
+    a_status: String,
+    b_status: String,
+    a_updated: String,
+    b_updated: String,
+    a_summary: String,
+    b_summary: String,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct ReviewCandidate {
+    #[serde(flatten)]
+    candidate: Candidate,
+    a_path: String,
+    b_path: String,
+    a_base_sha1: String,
+    b_base_sha1: String,
 }
 
 /// Report cached similarity candidates for live notes, without contacting the provider.
@@ -90,11 +110,30 @@ pub(crate) fn conflicts(
     top: usize,
     min_cos: f64,
     json: bool,
+    policy: &mut Inventory<'_>,
     out: &mut impl Write,
 ) -> anyhow::Result<()> {
-    let mut cache = required_cache(root, &provider::model())?;
-    let entries = notes::snapshot(root)?;
-    let embedded: Vec<_> = live_notes(&entries)
+    let cache = required_cache(root, &provider::model())?;
+    let entries = notes::snapshot_with(root, policy)?;
+    let embedded = embedded_notes(&entries, cache);
+    if embedded.len() < 2 {
+        anyhow::bail!(insufficient_embeddings(embedded.len()));
+    }
+    let judged = judged_pairs(root, policy)?;
+    let borrowed = judged
+        .iter()
+        .map(|[a, b]| [a.as_str(), b.as_str()])
+        .collect();
+    let pairs = best_pairs(&embedded, top, min_cos, &borrowed);
+    if json {
+        write_json(out, &embedded, &pairs)
+    } else {
+        write_text(out, &embedded, &pairs, min_cos)
+    }
+}
+
+fn embedded_notes(entries: &[NoteEntry], mut cache: Cache) -> Vec<Embedded<'_>> {
+    live_notes(entries)
         .into_iter()
         .filter_map(|(id, (path, note))| {
             let vector = normalize(cache.notes.remove(id)?.v);
@@ -105,19 +144,102 @@ pub(crate) fn conflicts(
                 vector,
             })
         })
-        .collect();
+        .collect()
+}
+
+fn insufficient_embeddings(count: usize) -> String {
+    format!("knowbox conflicts: only {count} embedded live note(s) — run `knowbox embed` first")
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub(crate) enum ConflictReport {
+    Ready {
+        candidates: Vec<ReviewCandidate>,
+        embedded: usize,
+        minimum_cosine: f64,
+        limit: usize,
+    },
+    Unavailable {
+        candidates: [ReviewCandidate; 0],
+        message: String,
+    },
+}
+
+/// Rank unjudged pairs using the local embedding cache and recorded raw verdicts.
+pub(crate) fn conflict_report(
+    root: &KbRoot,
+    top: usize,
+    min_cos: f64,
+    policy: &mut Inventory<'_>,
+) -> Result<ConflictReport> {
+    let cache = match required_cache(root, &provider::model()) {
+        Ok(cache) => cache,
+        Err(error) => {
+            return Ok(ConflictReport::Unavailable {
+                candidates: [],
+                message: error.to_string(),
+            });
+        }
+    };
+    let entries = notes::snapshot_with(root, policy)?;
+    let embedded = embedded_notes(&entries, cache);
     if embedded.len() < 2 {
-        bail!(
-            "knowbox conflicts: only {} embedded live note(s) — run `knowbox embed` first",
-            embedded.len()
-        );
+        return Ok(ConflictReport::Unavailable {
+            candidates: [],
+            message: insufficient_embeddings(embedded.len()),
+        });
     }
-    let pairs = best_pairs(&embedded, top, min_cos);
-    if json {
-        write_json(out, &embedded, &pairs)
-    } else {
-        write_text(out, &embedded, &pairs, min_cos)
-    }
+    let judged = judged_pairs(root, policy)?;
+    let borrowed = judged
+        .iter()
+        .map(|[a, b]| [a.as_str(), b.as_str()])
+        .collect();
+    let pairs = best_pairs(&embedded, top, min_cos, &borrowed);
+    let hashes: std::collections::BTreeMap<_, _> = entries
+        .iter()
+        .map(|entry| (entry.relative.as_str(), entry.sha1.as_str()))
+        .collect();
+    let candidates = candidate_rows(&embedded, &pairs)?;
+    let candidates = candidates
+        .into_iter()
+        .zip(&pairs)
+        .map(|(candidate, pair)| {
+            let (a, b) = (embedded[pair.a].path, embedded[pair.b].path);
+            let a_base = hashes
+                .get(a)
+                .context("missing snapshot for first conflict note")?;
+            let b_base = hashes
+                .get(b)
+                .context("missing snapshot for second conflict note")?;
+            Ok(ReviewCandidate {
+                candidate,
+                a_path: a.to_owned(),
+                b_path: b.to_owned(),
+                a_base_sha1: (*a_base).to_owned(),
+                b_base_sha1: (*b_base).to_owned(),
+            })
+        })
+        .collect::<Result<_>>()?;
+    Ok(ConflictReport::Ready {
+        candidates,
+        embedded: embedded.len(),
+        minimum_cosine: min_cos,
+        limit: top,
+    })
+}
+
+fn judged_pairs(root: &KbRoot, policy: &mut Inventory<'_>) -> Result<BTreeSet<[String; 2]>> {
+    Ok(raw_evidence(root, policy)?
+        .into_iter()
+        .filter_map(|item| match item {
+            RawEvidence::Verdict { mut ids, .. } => {
+                ids.sort_unstable();
+                Some(ids)
+            }
+            RawEvidence::Ingested { .. } => None,
+        })
+        .collect())
 }
 
 fn write_json(
@@ -125,27 +247,30 @@ fn write_json(
     embedded: &[Embedded<'_>],
     pairs: &[Pair],
 ) -> anyhow::Result<()> {
-    let rows: Vec<_> = pairs
+    serde_json::to_writer_pretty(&mut *out, &candidate_rows(embedded, pairs)?)?;
+    writeln!(out)?;
+    Ok(())
+}
+
+fn candidate_rows(embedded: &[Embedded<'_>], pairs: &[Pair]) -> Result<Vec<Candidate>> {
+    pairs
         .iter()
         .map(|pair| {
             let (a, b) = (&embedded[pair.a], &embedded[pair.b]);
-            Ok(JsonPair {
-                a: a.id,
-                b: b.id,
+            Ok(Candidate {
+                a: a.id.into(),
+                b: b.id.into(),
                 // Round only for display, not ranking or filtering.
                 cos: format!("{:.4}", pair.score).parse()?,
-                a_status: a.note.text("status", ""),
-                b_status: b.note.text("status", ""),
-                a_updated: a.note.text("updated", ""),
-                b_updated: b.note.text("updated", ""),
-                a_summary: a.note.text("summary", ""),
-                b_summary: b.note.text("summary", ""),
+                a_status: a.note.text("status", "").into_owned(),
+                b_status: b.note.text("status", "").into_owned(),
+                a_updated: a.note.text("updated", "").into_owned(),
+                b_updated: b.note.text("updated", "").into_owned(),
+                a_summary: a.note.text("summary", "").into_owned(),
+                b_summary: b.note.text("summary", "").into_owned(),
             })
         })
-        .collect::<Result<_, std::num::ParseFloatError>>()?;
-    serde_json::to_writer_pretty(&mut *out, &rows)?;
-    writeln!(out)?;
-    Ok(())
+        .collect()
 }
 
 fn write_text(
@@ -228,10 +353,13 @@ mod tests {
                 .collect::<Vec<_>>()
         };
         assert_eq!(
-            ids(best_pairs(&embedded, 2, 0.7)),
+            ids(best_pairs(&embedded, 2, 0.7, &BTreeSet::new())),
             [("kb-0001", "kb-0003"), ("kb-0001", "kb-0002")]
         );
-        assert_eq!(ids(best_pairs(&embedded, 8, 1.0)), [("kb-0001", "kb-0003")]);
+        assert_eq!(
+            ids(best_pairs(&embedded, 8, 1.0, &BTreeSet::new())),
+            [("kb-0001", "kb-0003")]
+        );
         Ok(())
     }
 
@@ -256,7 +384,11 @@ mod tests {
             },
         ];
         let mut out = Vec::new();
-        write_json(&mut out, &embedded, &best_pairs(&embedded, 1, 0.7))?;
+        write_json(
+            &mut out,
+            &embedded,
+            &best_pairs(&embedded, 1, 0.7, &BTreeSet::new()),
+        )?;
         assert_eq!(
             String::from_utf8(out)?,
             concat!(
@@ -291,7 +423,12 @@ mod tests {
             },
         ];
         let mut out = Vec::new();
-        write_text(&mut out, &embedded, &best_pairs(&embedded, 1, 0.7), 0.7)?;
+        write_text(
+            &mut out,
+            &embedded,
+            &best_pairs(&embedded, 1, 0.7, &BTreeSet::new()),
+            0.7,
+        )?;
         assert_eq!(
             String::from_utf8(out)?,
             format!(

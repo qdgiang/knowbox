@@ -1,14 +1,12 @@
 use std::collections::HashSet;
 use std::fs;
-use std::io::Write;
 
 use anyhow::Context;
-use jiff::civil::DateTime;
 
 use crate::config::KbRoot;
 use crate::index::ref_names;
 use crate::notes::NoteEntry;
-use crate::store::{self, WriteLock};
+use crate::store;
 
 // Test candidates from the vocabulary instead of allocating O(alphabet * len²)
 // edit strings. Python restricts inserted/substituted letters, not deletions or swaps.
@@ -33,7 +31,13 @@ fn one_edit(word: &str, candidate: &str) -> bool {
     a.is_some() && b.is_some() && x.next() == b && y.next() == a && x.as_str() == y.as_str()
 }
 
-pub(super) fn typo(terms: &[String], notes: &[NoteEntry]) -> (Vec<String>, Vec<String>) {
+#[derive(Debug, serde::Serialize)]
+pub(super) struct Correction {
+    pub(super) from: String,
+    pub(super) to: String,
+}
+
+pub(super) fn typo(terms: &[String], notes: &[NoteEntry]) -> (Vec<String>, Vec<Correction>) {
     let mut vocab = HashSet::new();
     for entry in notes {
         let Ok(note) = &entry.parsed else { continue };
@@ -60,14 +64,27 @@ pub(super) fn typo(terms: &[String], notes: &[NoteEntry]) -> (Vec<String>, Vec<S
         if let Some(only) = hits.next()
             && hits.next().is_none()
         {
-            fixes.push(format!("'{t}'→'{only}'"));
+            fixes.push(Correction {
+                from: t.clone(),
+                to: only.clone(),
+            });
             t.clone_from(only);
         }
     }
     (fixed, fixes)
 }
 
-pub(super) fn refs(root: &KbRoot, terms: &[String]) -> anyhow::Result<Vec<String>> {
+#[derive(Debug, serde::Serialize)]
+pub(super) struct RefHit {
+    pub(super) path: String,
+    pub(super) headings: Vec<String>,
+}
+
+pub(super) fn refs(
+    root: &KbRoot,
+    terms: &[String],
+    policy: &mut store::Inventory<'_>,
+) -> anyhow::Result<Vec<RefHit>> {
     let terms: Vec<_> = terms.iter().filter(|t| t.chars().count() >= 3).collect();
     let mut hits = Vec::new();
     if terms.is_empty() {
@@ -77,12 +94,12 @@ pub(super) fn refs(root: &KbRoot, terms: &[String]) -> anyhow::Result<Vec<String
         let lower = s.to_lowercase();
         terms.iter().any(|t| lower.contains(t.as_str()))
     };
-    for name in ref_names(root)? {
+    for name in ref_names(root, policy)? {
         if !name.ends_with(".md") {
             continue;
         }
         let path = root.path().join("refs").join(&name);
-        if !store::regular_file(&path)? {
+        if !policy.file(&path)? {
             continue;
         }
         let bytes = fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
@@ -94,29 +111,19 @@ pub(super) fn refs(root: &KbRoot, terms: &[String]) -> anyhow::Result<Vec<String
             .map(str::trim)
             .filter(|h| matches(h))
             .take(3)
+            .map(str::to_owned)
             .collect();
-        if !headings.is_empty() {
-            hits.push(format!("refs/{name}: {}", headings.join(" / ")));
-        } else if matches(&name) || matches(&text.chars().take(2048).collect::<String>()) {
-            hits.push(format!("refs/{name}: (filename or lead section)"));
+        if !headings.is_empty()
+            || matches(&name)
+            || matches(&text.chars().take(2048).collect::<String>())
+        {
+            hits.push(RefHit {
+                path: format!("refs/{name}"),
+                headings,
+            });
         }
     }
     Ok(hits)
-}
-
-pub(super) fn log_miss(root: &KbRoot, query: &str, now: DateTime) -> anyhow::Result<()> {
-    let lock = WriteLock::acquire(root)?;
-    let path = lock.root().path().join(".search-misses.log");
-    // Replacing instead of appending in place also protects notes aliased by hard links.
-    let mut bytes = if store::regular_file(&path)? {
-        fs::read(&path)?
-    } else {
-        Vec::new()
-    };
-    let query = query.replace(['\r', '\n', '\t'], " ");
-    writeln!(bytes, "{now:.0}\t{query}")?;
-    store::atomic_write(&path, &bytes)
-        .with_context(|| format!("recording search miss in {}", path.display()))
 }
 
 #[cfg(test)]

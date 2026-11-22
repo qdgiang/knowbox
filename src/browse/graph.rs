@@ -3,9 +3,11 @@ use std::collections::{BTreeMap, HashSet};
 use std::io::Write;
 
 use anyhow::{Context, bail};
+use serde::Serialize;
 
 use crate::config::KbRoot;
 use crate::notes::{self, NoteEntry};
+use crate::store::Inventory;
 
 use super::{parsed_notes, quoted, truthy_text};
 
@@ -22,7 +24,8 @@ pub(crate) enum Depth {
 }
 
 // Declaration order is the precedence when multiple channels assert one edge.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "snake_case")]
 enum Edge {
     Supersedes,
     Related,
@@ -39,7 +42,8 @@ impl Edge {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 enum Direction {
     Out,
     In,
@@ -52,36 +56,17 @@ struct Neighbor<'a> {
     direction: Direction,
 }
 
-impl Neighbor<'_> {
-    fn label(self) -> &'static str {
-        match (self.direction, self.edge) {
-            (Direction::In, Edge::Supersedes) => "superseded-by",
-            (Direction::In | Direction::Out, edge) => edge.name(),
-        }
-    }
-
-    fn search_provenance(self, seed: &str) -> String {
-        match (self.direction, self.edge) {
-            (Direction::Out, edge) => format!("via {}: {seed}", edge.name()),
-            (Direction::In, Edge::Supersedes) => format!("supersedes: {seed}"),
-            (Direction::In, Edge::Related | Edge::Mention) => format!("← backlink: {seed}"),
-        }
-    }
-}
-
 struct Node<'a> {
     path: &'a str,
     title: Cow<'a, str>,
     superseded: bool,
+    domain: Option<&'a str>,
+    status: Option<&'a str>,
     outgoing: BTreeMap<&'a str, Edge>,
     incoming: BTreeMap<&'a str, Edge>,
 }
 
 impl<'a> Node<'a> {
-    fn tag(&self) -> &'static str {
-        if self.superseded { " (superseded)" } else { "" }
-    }
-
     fn neighbors(&self, direction: Direction) -> impl Iterator<Item = Neighbor<'a>> {
         let edges = match direction {
             Direction::Out => &self.outgoing,
@@ -100,45 +85,41 @@ impl<'a> Node<'a> {
     }
 }
 
-type Graph<'a> = BTreeMap<&'a str, Node<'a>>;
-
-fn id_prefix(value: &str) -> Option<&str> {
-    let id = value.get(..7)?;
-    (id.starts_with("kb-") && id.as_bytes()[3..].iter().all(u8::is_ascii_digit)).then_some(id)
+struct GraphIndex<'a> {
+    nodes: BTreeMap<&'a str, Node<'a>>,
+    edges: BTreeMap<(&'a str, &'a str), Edge>,
+    duplicates: BTreeMap<&'a str, Vec<&'a str>>,
 }
 
-fn wikilinks(body: &str) -> impl Iterator<Item = &str> {
-    body.match_indices('[').filter_map(move |(offset, _)| {
-        let rest = body[offset..].strip_prefix("[[")?;
-        let target = id_prefix(rest)?;
-        rest[target.len()..].starts_with("]]").then_some(target)
-    })
-}
-
-fn build_graph(entries: &[NoteEntry]) -> Graph<'_> {
-    let mut graph = BTreeMap::new();
-    let mut sources = Vec::new();
+fn build_graph(entries: &[NoteEntry]) -> GraphIndex<'_> {
+    let mut nodes = BTreeMap::new();
+    let mut duplicates = BTreeMap::<_, Vec<_>>::new();
+    let mut edges = BTreeMap::new();
     for (path, note) in parsed_notes(entries) {
         let id = note
             .scalar("id")
             .map(str::trim)
-            .filter(|id| id_prefix(id) == Some(id))
-            .or_else(|| path.rsplit('/').next().and_then(id_prefix));
+            .filter(|id| notes::is_id(id))
+            .or_else(|| path.rsplit('/').next().and_then(notes::id_prefix));
         let Some(id) = id else { continue };
-        sources.push((id, note));
-        graph.insert(
+        if let Some(previous) = nodes.insert(
             id,
             Node {
                 path,
                 title: truthy_text(note, "title").unwrap_or(Cow::Borrowed(id)),
                 superseded: note.scalar("status") == Some("superseded"),
+                domain: note.scalar("domain"),
+                status: note.scalar("status"),
                 outgoing: BTreeMap::new(),
                 incoming: BTreeMap::new(),
             },
-        );
-    }
-    for (source, note) in sources {
-        let edges = note
+        ) {
+            duplicates
+                .entry(id)
+                .or_insert_with(|| vec![previous.path])
+                .push(path);
+        }
+        let links = note
             .items("related")
             .into_iter()
             .map(|id| (id.trim(), Edge::Related))
@@ -147,175 +128,367 @@ fn build_graph(entries: &[NoteEntry]) -> Graph<'_> {
                     .into_iter()
                     .map(|id| (id.trim(), Edge::Supersedes)),
             )
-            .chain(wikilinks(&note.body).map(|id| (id, Edge::Mention)));
-        for (target, edge) in edges {
-            if target == source {
-                continue;
-            }
-            if let Some(node) = graph.get_mut(target) {
-                fold_edge(&mut node.incoming, source, edge);
-                let Some(node) = graph.get_mut(source) else {
-                    unreachable!("graph source was inserted")
-                };
-                fold_edge(&mut node.outgoing, target, edge);
+            .chain(notes::body_links(&note.body).map(|id| (id, Edge::Mention)));
+        for (target, edge) in links {
+            if !target.is_empty() {
+                edges
+                    .entry((id, target))
+                    .and_modify(|prev: &mut Edge| *prev = (*prev).min(edge))
+                    .or_insert(edge);
             }
         }
     }
-    graph
+    for (&(source, target), &edge) in &edges {
+        if target != source
+            && let Some(node) = nodes.get_mut(target)
+        {
+            node.incoming.insert(source, edge);
+            let Some(node) = nodes.get_mut(source) else {
+                unreachable!("graph source was inserted")
+            };
+            node.outgoing.insert(target, edge);
+        }
+    }
+    GraphIndex {
+        nodes,
+        edges,
+        duplicates,
+    }
 }
 
-fn fold_edge<'a>(edges: &mut BTreeMap<&'a str, Edge>, id: &'a str, edge: Edge) {
-    edges
-        .entry(id)
-        .and_modify(|prev| *prev = (*prev).min(edge))
-        .or_insert(edge);
+#[derive(Debug, Serialize)]
+pub(crate) struct GraphReport {
+    nodes: Vec<GraphNode>,
+    edges: Vec<GraphEdge>,
+    isolates: Vec<String>,
+    duplicate_ids: Vec<DuplicateId>,
 }
 
-/// Print an author-written link neighborhood; unknown or unparseable seeds are errors.
+pub(crate) fn authored_edges(entries: &[NoteEntry]) -> Vec<(&str, &str)> {
+    build_graph(entries).edges.into_keys().collect()
+}
+
+#[derive(Debug, Serialize)]
+struct GraphNode {
+    id: String,
+    path: String,
+    title: String,
+    domain: Option<String>,
+    status: Option<String>,
+    superseded: bool,
+}
+
+impl GraphNode {
+    fn new(id: &str, node: &Node<'_>) -> Self {
+        Self {
+            id: id.to_owned(),
+            path: node.path.to_owned(),
+            title: node.title.to_string(),
+            domain: node.domain.map(str::to_owned),
+            status: node.status.map(str::to_owned),
+            superseded: node.superseded,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct GraphEdge {
+    source: String,
+    target: String,
+    kind: Edge,
+    dangling: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct DuplicateId {
+    id: String,
+    paths: Vec<String>,
+}
+
+pub(crate) fn graph(root: &KbRoot, policy: &mut Inventory<'_>) -> anyhow::Result<GraphReport> {
+    let entries = notes::snapshot_with(root, policy).context("building link graph")?;
+    let graph = build_graph(&entries);
+    let connected: HashSet<_> = graph
+        .edges
+        .keys()
+        .flat_map(|&(source, target)| [source, target])
+        .collect();
+    Ok(GraphReport {
+        nodes: graph
+            .nodes
+            .iter()
+            .map(|(id, node)| GraphNode::new(id, node))
+            .collect(),
+        edges: graph
+            .edges
+            .into_iter()
+            .map(|((source, target), kind)| GraphEdge {
+                source: source.to_owned(),
+                target: target.to_owned(),
+                kind,
+                dangling: !graph.nodes.contains_key(target),
+            })
+            .collect(),
+        isolates: graph
+            .nodes
+            .keys()
+            .copied()
+            .filter(|id| !connected.contains(id))
+            .map(str::to_owned)
+            .collect(),
+        duplicate_ids: graph
+            .duplicates
+            .into_iter()
+            .map(|(id, paths)| DuplicateId {
+                id: id.to_owned(),
+                paths: paths.into_iter().map(str::to_owned).collect(),
+            })
+            .collect(),
+    })
+}
+
+impl GraphReport {
+    pub(crate) fn render(&self, out: &mut impl Write) -> anyhow::Result<()> {
+        writeln!(
+            out,
+            "{} nodes, {} directed edges",
+            self.nodes.len(),
+            self.edges.len()
+        )?;
+        for node in &self.nodes {
+            writeln!(out, "{}  {}  {}", node.id, node.path, node.title)?;
+        }
+        for edge in &self.edges {
+            let tag = if edge.dangling { " (dangling)" } else { "" };
+            writeln!(
+                out,
+                "{}  {}  {}{tag}",
+                edge.source,
+                edge.kind.name(),
+                edge.target
+            )?;
+        }
+        for duplicate in &self.duplicate_ids {
+            writeln!(
+                out,
+                "duplicate {}: {}",
+                duplicate.id,
+                duplicate.paths.join(", ")
+            )?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct SearchNeighbor {
+    pub(crate) id: String,
+    path: String,
+    title: String,
+    superseded: bool,
+    via: String,
+    depth: u8,
+    direction: Direction,
+    #[serde(rename = "kind")]
+    edge: Edge,
+}
+
+impl SearchNeighbor {
+    fn new(link: Neighbor<'_>, node: &Node<'_>, via: &str, depth: u8) -> Self {
+        Self {
+            id: link.id.to_owned(),
+            path: node.path.to_owned(),
+            title: node.title.to_string(),
+            superseded: node.superseded,
+            via: via.to_owned(),
+            depth,
+            direction: link.direction,
+            edge: link.edge,
+        }
+    }
+
+    fn label(&self) -> &'static str {
+        match (self.direction, self.edge) {
+            (Direction::In, Edge::Supersedes) => "superseded-by",
+            (Direction::In | Direction::Out, edge) => edge.name(),
+        }
+    }
+
+    fn search_provenance(&self) -> String {
+        let seed = &self.via;
+        match (self.direction, self.edge) {
+            (Direction::Out, edge) => format!("via {}: {seed}", edge.name()),
+            (Direction::In, Edge::Supersedes) => format!("supersedes: {seed}"),
+            (Direction::In, Edge::Related | Edge::Mention) => format!("← backlink: {seed}"),
+        }
+    }
+    fn tag(&self) -> &'static str {
+        if self.superseded { " (superseded)" } else { "" }
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct Expansion {
+    seed: GraphNode,
+    neighbors: Vec<SearchNeighbor>,
+}
+
+/// Resolve an author-written link neighborhood in CLI display order.
 pub(crate) fn expand(
     root: &KbRoot,
     selector: &str,
     depth: Depth,
-    out: &mut impl Write,
-) -> anyhow::Result<()> {
-    let path = notes::find(root, selector)?;
+    policy: &mut Inventory<'_>,
+) -> anyhow::Result<Expansion> {
+    let path = notes::find_with(root, selector, policy)?;
     let id = path
         .as_deref()
         .and_then(|path| path.file_name())
         .and_then(|name| name.to_str())
-        .and_then(id_prefix);
+        .and_then(notes::id_prefix);
     let Some(id) = id else {
         bail!("knowbox expand: no note for {}", quoted(selector))
     };
-    let entries = notes::snapshot(root).context("building link graph")?;
+    let entries = notes::snapshot_with(root, policy).context("building link graph")?;
     let graph = build_graph(&entries);
-    let Some(seed) = graph.get(id) else {
+    let Some(seed) = graph.nodes.get(id) else {
         bail!("knowbox expand: no note for {}", quoted(selector))
     };
-    render_neighborhood(&graph, id, seed, depth, out)
-}
-
-fn render_neighborhood(
-    graph: &Graph<'_>,
-    id: &str,
-    seed: &Node<'_>,
-    depth: Depth,
-    out: &mut impl Write,
-) -> anyhow::Result<()> {
-    if seed.superseded {
-        writeln!(
-            out,
-            "(note: {id} is superseded — showing its links; prefer the successor)"
-        )?;
-    }
-    writeln!(out, "{id} — {}\n  {}", seed.title, seed.path)?;
-    if seed.outgoing.is_empty() && seed.incoming.is_empty() {
-        writeln!(out, "\n(no author-written links)")?;
-        return Ok(());
-    }
+    let mut neighbors = Vec::new();
     let mut frontier = Vec::new();
-    for (direction, header) in [
-        (Direction::Out, "links to:"),
-        (Direction::In, "linked from (backlinks):"),
-    ] {
-        let mut neighbors = seed.neighbors(direction).take(LEVEL_CAP).peekable();
-        if neighbors.peek().is_some() {
-            writeln!(out, "\n  {header}")?;
-        }
-        for neighbor in neighbors {
-            print_neighbor(out, neighbor, &graph[neighbor.id], "")?;
-            frontier.push(neighbor.id);
+    for direction in [Direction::Out, Direction::In] {
+        for link in seed.neighbors(direction).take(LEVEL_CAP) {
+            neighbors.push(SearchNeighbor::new(link, &graph.nodes[link.id], id, 1));
+            frontier.push(link.id);
         }
     }
     if depth == Depth::Two {
-        // Exclude all direct neighbors, including the ones hidden by the level cap.
-        let mut seen: HashSet<_> = seed.all_neighbors().map(|neighbor| neighbor.id).collect();
+        // A direct neighbor hidden by the display cap still belongs to depth one.
+        let mut seen: HashSet<_> = seed.all_neighbors().map(|link| link.id).collect();
         seen.insert(id);
         let second_hop = frontier
             .into_iter()
             .flat_map(|via| {
-                graph[via]
+                graph.nodes[via]
                     .all_neighbors()
-                    .map(move |neighbor| (via, neighbor))
+                    .map(move |link| (via, link))
             })
-            .filter(|(_, neighbor)| seen.insert(neighbor.id))
+            .filter(|(_, link)| seen.insert(link.id))
             .take(LEVEL_CAP);
-        for (index, (via, neighbor)) in second_hop.enumerate() {
-            if index == 0 {
-                writeln!(out, "\n  depth 2 (new neighbours, excluding the above):")?;
-            }
-            print_neighbor(out, neighbor, &graph[neighbor.id], &format!(" (via {via})"))?;
+        for (via, link) in second_hop {
+            neighbors.push(SearchNeighbor::new(link, &graph.nodes[link.id], via, 2));
         }
     }
-    Ok(())
+    Ok(Expansion {
+        seed: GraphNode::new(id, seed),
+        neighbors,
+    })
 }
 
-fn print_neighbor(
-    out: &mut impl Write,
-    neighbor: Neighbor<'_>,
-    node: &Node<'_>,
-    suffix: &str,
-) -> std::io::Result<()> {
-    writeln!(
-        out,
-        "    {:<13} {}  {}{}{suffix}",
-        neighbor.label(),
-        neighbor.id,
-        node.title,
-        node.tag()
-    )
+impl Expansion {
+    pub(crate) fn displayed_ids(&self) -> Vec<String> {
+        std::iter::once(&self.seed.id)
+            .chain(self.neighbors.iter().map(|row| &row.id))
+            .cloned()
+            .collect()
+    }
+
+    pub(crate) fn render(&self, out: &mut impl Write) -> anyhow::Result<()> {
+        let seed = &self.seed;
+        if seed.superseded {
+            writeln!(
+                out,
+                "(note: {} is superseded — showing its links; prefer the successor)",
+                seed.id
+            )?;
+        }
+        writeln!(out, "{} — {}\n  {}", seed.id, seed.title, seed.path)?;
+        if self.neighbors.is_empty() {
+            writeln!(out, "\n(no author-written links)")?;
+        }
+        let mut previous = None;
+        for row in &self.neighbors {
+            let header = match (row.depth, row.direction) {
+                (1, Direction::Out) => "links to:",
+                (1, Direction::In) => "linked from (backlinks):",
+                _ => "depth 2 (new neighbours, excluding the above):",
+            };
+            if previous != Some(header) {
+                writeln!(out, "\n  {header}")?;
+                previous = Some(header);
+            }
+            write!(
+                out,
+                "    {:<13} {}  {}{}",
+                row.label(),
+                row.id,
+                row.title,
+                row.tag()
+            )?;
+            if row.depth == 2 {
+                write!(out, " (via {})", row.via)?;
+            }
+            writeln!(out)?;
+        }
+        Ok(())
+    }
 }
 
-/// Append a graph block for displayed search hits; unavailable graph data is nonfatal.
 pub(crate) fn search_expansion(
     root: &KbRoot,
     ids: &[&str],
-    out: &mut impl Write,
-) -> anyhow::Result<()> {
+    policy: &mut Inventory<'_>,
+) -> anyhow::Result<Vec<SearchNeighbor>> {
     let seeds = ids
         .iter()
         .copied()
         .take(SEARCH_SEEDS)
         .filter(|id| !id.is_empty());
     if seeds.clone().next().is_none() {
-        return Ok(());
+        return Ok(Vec::new());
     }
     // Search has already returned valid hits; optional graph I/O cannot invalidate them.
-    let Ok(entries) = notes::snapshot(root) else {
-        return Ok(());
-    };
+    let entries = notes::snapshot_with(root, policy)?;
     let graph = build_graph(&entries);
     let mut seen: HashSet<_> = ids.iter().copied().collect();
-    let mut printed = 0;
+    let mut displayed = Vec::new();
     for seed in seeds {
-        let Some(node) = graph.get(seed) else {
+        let Some(node) = graph.nodes.get(seed) else {
             continue;
         };
-        let capacity = SEARCH_PER_SEED.min(SEARCH_TOTAL - printed);
+        let capacity = SEARCH_PER_SEED.min(SEARCH_TOTAL - displayed.len());
         for neighbor in node
             .all_neighbors()
             .filter(|neighbor| seen.insert(neighbor.id))
             .take(capacity)
         {
-            if printed == 0 {
-                writeln!(
-                    out,
-                    "(graph neighbours of top hits — depth 1, opt-in --expand:)"
-                )?;
-            }
-            let node = &graph[neighbor.id];
-            writeln!(out, "    {}  {}{}", neighbor.id, node.path, node.tag())?;
-            writeln!(
-                out,
-                "        {} — {}",
-                neighbor.search_provenance(seed),
-                node.title
-            )?;
-            printed += 1;
+            displayed.push(SearchNeighbor::new(
+                neighbor,
+                &graph.nodes[neighbor.id],
+                seed,
+                1,
+            ));
         }
-        if printed == SEARCH_TOTAL {
+        if displayed.len() == SEARCH_TOTAL {
             break;
         }
+    }
+    Ok(displayed)
+}
+
+pub(crate) fn render_search_expansion(
+    rows: &[SearchNeighbor],
+    out: &mut impl Write,
+) -> anyhow::Result<()> {
+    if !rows.is_empty() {
+        writeln!(
+            out,
+            "(graph neighbours of top hits — depth 1, opt-in --expand:)"
+        )?;
+    }
+    for row in rows {
+        writeln!(out, "    {}  {}{}", row.id, row.path, row.tag())?;
+        writeln!(out, "        {} — {}", row.search_provenance(), row.title)?;
     }
     Ok(())
 }
@@ -332,6 +505,40 @@ mod tests {
             root.path().join("notes").join(format!("{id}.md")),
             format!("---\nid: {id}\n{fields}\n---\n{body}"),
         )
+    }
+
+    #[test]
+    fn graph_keeps_folded_dangling_edges_isolated_nodes_and_duplicate_paths() -> anyhow::Result<()>
+    {
+        let (_dir, root) = fixture()?;
+        write_note(
+            &root,
+            "kb-0001",
+            "related: [kb-0002, kb-9999]",
+            "[[kb-0002]]",
+        )?;
+        fs::write(
+            root.path().join("notes/duplicate.md"),
+            "---\nid: kb-0001\nsupersedes: [kb-0002, kb-9999]\n---",
+        )?;
+        write_note(&root, "kb-0002", "", "")?;
+        write_note(&root, "kb-0003", "", "")?;
+        let report = serde_json::to_value(graph(&root, &mut Inventory::Strict)?)?;
+        assert_eq!(report["isolates"], serde_json::json!(["kb-0003"]));
+        assert_eq!(
+            report["duplicate_ids"],
+            serde_json::json!([{"id":"kb-0001","paths":["notes/duplicate.md", "notes/kb-0001.md"]}])
+        );
+        assert_eq!(
+            report["edges"],
+            serde_json::json!([
+                {"source": "kb-0001", "target": "kb-0002", "kind": "supersedes", "dangling": false},
+                {"source": "kb-0001", "target": "kb-9999", "kind": "supersedes", "dangling": true}
+            ])
+        );
+        assert_eq!(report["nodes"][0]["path"], "notes/kb-0001.md");
+        assert_eq!(report["nodes"][2]["id"], "kb-0003");
+        Ok(())
     }
 
     #[test]
@@ -354,7 +561,7 @@ mod tests {
         write_note(&root, "kb-0005", "title: shared", "")?;
         fs::write(root.path().join("notes/kb-0006.md"), "---\nid: kb-0006")?;
         let mut one = Vec::new();
-        expand(&root, "kb-0001", Depth::One, &mut one)?;
+        expand(&root, "kb-0001", Depth::One, &mut Inventory::Strict)?.render(&mut one)?;
         let common = concat!(
             "(note: kb-0001 is superseded — showing its links; prefer the successor)\n",
             "kb-0001 — kb-0001\n  notes/kb-0001.md\n",
@@ -364,7 +571,34 @@ mod tests {
         );
         assert_eq!(String::from_utf8(one)?, common);
         let mut two = Vec::new();
-        expand(&root, "kb-0001.md", Depth::Two, &mut two)?;
+        let expanded = expand(&root, "kb-0001.md", Depth::Two, &mut Inventory::Strict)?;
+        let provenance: Vec<_> = expanded
+            .neighbors
+            .iter()
+            .map(|row| {
+                (
+                    row.id.as_str(),
+                    row.via.as_str(),
+                    row.depth,
+                    row.direction,
+                    row.edge,
+                )
+            })
+            .collect();
+        assert_eq!(
+            provenance,
+            [
+                ("kb-0002", "kb-0001", 1, Direction::Out, Edge::Supersedes),
+                ("kb-0003", "kb-0001", 1, Direction::In, Edge::Mention),
+                ("kb-0004", "kb-0001", 1, Direction::In, Edge::Supersedes),
+                ("kb-0005", "kb-0002", 2, Direction::Out, Edge::Related),
+            ]
+        );
+        assert_eq!(
+            expanded.displayed_ids(),
+            ["kb-0001", "kb-0002", "kb-0003", "kb-0004", "kb-0005"]
+        );
+        expanded.render(&mut two)?;
         assert_eq!(
             String::from_utf8(two)?,
             format!(
@@ -385,7 +619,14 @@ mod tests {
         write_note(&root, "kb-0005", "supersedes: kb-0001", "")?;
         write_note(&root, "kb-0006", "title: other", "")?;
         let mut out = Vec::new();
-        search_expansion(&root, &["kb-0001", "kb-0002", "", "kb-0004"], &mut out)?;
+        render_search_expansion(
+            &search_expansion(
+                &root,
+                &["kb-0001", "kb-0002", "", "kb-0004"],
+                &mut Inventory::Strict,
+            )?,
+            &mut out,
+        )?;
         assert_eq!(
             String::from_utf8(out)?,
             concat!(
@@ -413,7 +654,7 @@ mod tests {
             write_note(&root, id, &fields, "")?;
         }
         let mut out = Vec::new();
-        expand(&root, "kb-0001", Depth::One, &mut out)?;
+        expand(&root, "kb-0001", Depth::One, &mut Inventory::Strict)?.render(&mut out)?;
         let text = String::from_utf8(out)?;
         let ids: Vec<_> = text
             .lines()
@@ -423,7 +664,14 @@ mod tests {
         assert_eq!(ids, all[..12]);
 
         let mut out = Vec::new();
-        search_expansion(&root, &["kb-0001", "kb-0002", "kb-0003"], &mut out)?;
+        render_search_expansion(
+            &search_expansion(
+                &root,
+                &["kb-0001", "kb-0002", "kb-0003"],
+                &mut Inventory::Strict,
+            )?,
+            &mut out,
+        )?;
         let text = String::from_utf8(out)?;
         let ids: Vec<_> = text
             .lines()

@@ -1,6 +1,7 @@
 use jiff::civil::Date;
 
-use super::{Fusion, Live, RankedHit, SemanticHit};
+use super::{Fusion, Live, SemanticHit};
+use crate::search::{Hit, MatchKind, Ranks};
 
 pub(super) const COS_FLOOR: f64 = 0.40;
 pub(super) const DISPLAY: usize = 6;
@@ -47,13 +48,13 @@ fn contribution(index: usize, weight: f64) -> f64 {
 }
 
 struct Scored {
-    row: RankedHit,
+    row: Hit,
     score: f64,
     lex_rank: usize,
 }
 
 pub(super) fn fuse_rows(
-    lexical: &[RankedHit],
+    lexical: &[Hit],
     semantic: &[SemanticHit],
     live: &Live,
     now: Date,
@@ -69,46 +70,67 @@ pub(super) fn fuse_rows(
         })
         .collect();
     let mut extras = Vec::new();
-    let mut participating = false;
-    for (i, sem) in semantic.iter().filter(|s| s.score >= COS_FLOOR).enumerate() {
-        participating = true;
-        let score = contribution(i, 0.5);
+    let mut participating = 0;
+    for (i, sem) in semantic.iter().enumerate() {
         let k = key(&sem.path, &sem.id);
-        if let Some(lex) = rows.iter_mut().find(|r| key(&r.row.path, &r.row.id) == k) {
-            lex.score += score;
+        let lexical = rows.iter_mut().find(|r| key(&r.row.path, &r.row.id) == k);
+        if let Some(lex) = lexical {
+            lex.row.ranks.cosine = Some(sem.score);
+            lex.row.ranks.cosine_rank = Some(i + 1);
+            if sem.score >= COS_FLOOR {
+                lex.score += contribution(participating, 0.5);
+            }
         } else if sem.score >= 0.45 {
-            extras.push((sem, score, k));
+            extras.push((sem, contribution(participating, 0.5), k, i + 1));
+        }
+        if sem.score >= COS_FLOOR {
+            participating += 1;
         }
     }
-    if !participating {
-        return Fusion::unchanged(lexical);
+    if participating == 0 {
+        return Fusion {
+            rows: rows.into_iter().map(|r| r.row).collect(),
+            changed: false,
+            recency_changed: false,
+        };
     }
-    extras.sort_by(|(a, _, ka), (b, _, kb)| b.score.total_cmp(&a.score).then(ka.cmp(kb)));
-    rows.extend(extras.into_iter().take(2).map(|(sem, score, _)| {
-        let snippet = live
-            .get(sem.id.as_str())
-            .map(|(_, note)| {
-                let summary = note.text("summary", "");
-                if summary.trim().is_empty() || summary == "[]" {
-                    super::excerpt(&note.body, 160)
-                } else {
-                    summary.trim().to_owned()
+    extras.sort_by(|(a, _, ka, _), (b, _, kb, _)| b.score.total_cmp(&a.score).then(ka.cmp(kb)));
+    rows.extend(
+        extras
+            .into_iter()
+            .take(2)
+            .map(|(sem, score, _, cosine_rank)| {
+                let snippet = live
+                    .get(sem.id.as_str())
+                    .map(|(_, note)| {
+                        let summary = note.text("summary", "");
+                        if summary.trim().is_empty() || summary == "[]" {
+                            super::excerpt(&note.body, 160)
+                        } else {
+                            summary.trim().to_owned()
+                        }
+                    })
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_else(|| sem.title.clone());
+                Scored {
+                    row: Hit {
+                        id: sem.id.clone(),
+                        path: sem.path.clone(),
+                        title: sem.title.clone(),
+                        snippet,
+                        match_kind: MatchKind::SemanticOnly,
+                        ranks: Ranks {
+                            cosine: Some(sem.score),
+                            cosine_rank: Some(cosine_rank),
+                            ..Ranks::default()
+                        },
+                        direct: None,
+                    },
+                    score,
+                    lex_rank: usize::MAX,
                 }
-            })
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| sem.title.clone());
-        Scored {
-            row: RankedHit {
-                id: sem.id.clone(),
-                path: sem.path.clone(),
-                title: sem.title.clone(),
-                snippet,
-                semantic_only: true,
-            },
-            score,
-            lex_rank: usize::MAX,
-        }
-    }));
+            }),
+    );
     rows.sort_by(|a, b| {
         b.score
             .total_cmp(&a.score)
@@ -133,9 +155,8 @@ pub(super) fn fuse_rows(
         // Stable sort preserves the prior RRF tie-break. No dated tail row can
         // cross a lexical row, even if decaying the latter inverted the scores.
         rows.sort_by(|a, b| {
-            a.row
-                .semantic_only
-                .cmp(&b.row.semantic_only)
+            (a.row.match_kind == MatchKind::SemanticOnly)
+                .cmp(&(b.row.match_kind == MatchKind::SemanticOnly))
                 .then_with(|| b.score.total_cmp(&a.score))
         });
         recency_changed = before.iter().ne(rows.iter().map(|r| &r.row.id));
@@ -145,7 +166,14 @@ pub(super) fn fuse_rows(
         .map(|r| &r.id)
         .ne(rows.iter().map(|r| &r.row.id));
     Fusion {
-        rows: rows.into_iter().map(|r| r.row).collect(),
+        rows: rows
+            .into_iter()
+            .enumerate()
+            .map(|(i, mut r)| {
+                r.row.ranks.fused_rank = Some(i + 1);
+                r.row
+            })
+            .collect(),
         changed,
         recency_changed,
     }
@@ -156,13 +184,15 @@ mod tests {
     use super::*;
     use anyhow::Result;
 
-    fn lex(id: &str) -> RankedHit {
-        RankedHit {
+    fn lex(id: &str) -> Hit {
+        Hit {
             id: id.into(),
             path: format!("notes/{id}.md"),
             title: id.into(),
             snippet: format!("lex {id}"),
-            semantic_only: false,
+            match_kind: MatchKind::Partial,
+            ranks: Ranks::default(),
+            direct: None,
         }
     }
     fn sem(id: &str, score: f64) -> SemanticHit {
@@ -190,7 +220,11 @@ mod tests {
             fused
                 .rows
                 .iter()
-                .map(|r| (r.id.as_str(), r.semantic_only, r.snippet.as_str()))
+                .map(|r| (
+                    r.id.as_str(),
+                    r.match_kind == MatchKind::SemanticOnly,
+                    r.snippet.as_str()
+                ))
                 .collect::<Vec<_>>(),
             [
                 ("B", false, "lex B"),
@@ -207,7 +241,15 @@ mod tests {
             now,
             false,
         );
-        assert_eq!(below_floor.rows, lexical);
+        let mut expected = lexical;
+        expected[0].ranks.fused_rank = Some(1);
+        expected[1].ranks = Ranks {
+            cosine: Some(0.399),
+            cosine_rank: Some(1),
+            fused_rank: Some(2),
+            ..Ranks::default()
+        };
+        assert_eq!(below_floor.rows, expected);
         assert!(!below_floor.changed);
         Ok(())
     }

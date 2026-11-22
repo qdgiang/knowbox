@@ -1,28 +1,36 @@
+mod detail;
+
 use std::borrow::Cow;
 use std::collections::BTreeMap;
+#[cfg(test)]
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
+use serde::Serialize;
 use sha1::{Digest, Sha1};
 use thiserror::Error;
 
 use crate::config::KbRoot;
-use crate::store::{directory, regular_file};
+use crate::store::{EntryKind, Inventory, directory, read_regular};
+
+pub(crate) use detail::{read_detail, read_detail_path};
 
 const MAX_LIST_DEPTH: usize = 128;
 
-#[derive(Debug, PartialEq, Eq)]
-enum NoteValue {
+#[derive(Debug, PartialEq, Eq, Serialize)]
+#[serde(untagged)]
+pub(crate) enum NoteValue {
     Scalar(String),
     List(Vec<NoteValue>),
 }
 
 /// A Markdown body and its scalar/list frontmatter.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Serialize)]
 pub(crate) struct Note {
     pub(crate) body: String,
-    meta: BTreeMap<String, NoteValue>,
+    #[serde(rename = "frontmatter")]
+    pub(crate) meta: BTreeMap<String, NoteValue>,
 }
 
 impl Note {
@@ -236,7 +244,7 @@ pub(crate) fn parse(bytes: &[u8]) -> Result<Note, ParseError> {
     })
 }
 
-fn key_line(line: &str) -> Option<(&str, &str)> {
+pub(crate) fn key_line(line: &str) -> Option<(&str, &str)> {
     let colon = line.find(':')?;
     let key = &line[..colon];
     if key.is_empty()
@@ -306,8 +314,6 @@ pub(crate) enum NoteError {
     Inspect { path: PathBuf, source: io::Error },
     #[error("reading note {}", .path.display())]
     Read { path: PathBuf, source: io::Error },
-    #[error("note filename is not UTF-8: {0:?}")]
-    InvalidFilename(PathBuf),
 }
 
 #[derive(Debug)]
@@ -315,25 +321,56 @@ pub(crate) struct NoteEntry {
     pub(crate) relative: String,
     pub(crate) size: usize,
     pub(crate) sha1: String,
+    pub(crate) lf_sha1: Option<String>,
     pub(crate) parsed: Result<Note, ParseError>,
 }
 
 /// Read the direct `.md` files in `notes/`, preserving parse failures for lint.
 pub(crate) fn snapshot(root: &KbRoot) -> Result<Vec<NoteEntry>, NoteError> {
+    snapshot_with(root, &mut Inventory::Strict)
+}
+
+pub(crate) fn snapshot_with(
+    root: &KbRoot,
+    policy: &mut Inventory<'_>,
+) -> Result<Vec<NoteEntry>, NoteError> {
     let notes = root.path().join("notes");
-    inventory(&notes)?
-        .into_iter()
-        .map(|name| {
-            let path = notes.join(&name);
-            let bytes = fs::read(&path).map_err(|source| NoteError::Read { path, source })?;
-            Ok(NoteEntry {
+    let mut entries = Vec::new();
+    for name in inventory(&notes, policy)? {
+        if let Some(bytes) = read_with(&notes.join(&name), policy)? {
+            entries.push(NoteEntry {
                 relative: format!("notes/{name}"),
                 size: bytes.len(),
                 sha1: sha1_hex(&bytes),
+                lf_sha1: lf_sha1(&bytes),
                 parsed: parse(&bytes),
-            })
+            });
+        }
+    }
+    Ok(entries)
+}
+
+pub(crate) fn read_with(
+    path: &Path,
+    policy: &mut Inventory<'_>,
+) -> Result<Option<Vec<u8>>, NoteError> {
+    if !policy.file(path).map_err(|source| NoteError::Inspect {
+        path: path.into(),
+        source,
+    })? {
+        return Ok(None);
+    }
+    read_regular(path)
+        .map(Some)
+        .map_err(|source| NoteError::Read {
+            path: path.into(),
+            source,
         })
-        .collect()
+}
+
+pub(crate) fn validate_inventory(root: &KbRoot) -> Result<(), NoteError> {
+    inventory(&root.path().join("notes"), &mut Inventory::Strict)?;
+    Ok(())
 }
 
 pub(crate) fn sha1_hex(bytes: &[u8]) -> String {
@@ -349,7 +386,15 @@ pub(crate) fn sha1_hex(bytes: &[u8]) -> String {
         .collect()
 }
 
-fn inventory(notes: &Path) -> Result<Vec<String>, NoteError> {
+pub(crate) fn lf_sha1(bytes: &[u8]) -> Option<String> {
+    if !bytes.windows(2).any(|pair| pair == b"\r\n") || bytes.contains(&0) {
+        return None;
+    }
+    let text = std::str::from_utf8(bytes).ok()?;
+    Some(sha1_hex(text.replace("\r\n", "\n").as_bytes()))
+}
+
+fn inventory(notes: &Path, policy: &mut Inventory<'_>) -> Result<Vec<String>, NoteError> {
     let inspect = |source| NoteError::Inspect {
         path: notes.into(),
         source,
@@ -357,26 +402,9 @@ fn inventory(notes: &Path) -> Result<Vec<String>, NoteError> {
     if !directory(notes).map_err(inspect)? {
         return Ok(Vec::new());
     }
-    let mut names = Vec::new();
-    for entry in fs::read_dir(notes).map_err(inspect)? {
-        let entry = entry.map_err(inspect)?;
-        let name = entry.file_name();
-        if !name.as_encoded_bytes().ends_with(b".md") {
-            continue;
-        }
-        let path = entry.path();
-        if regular_file(&path).map_err(|source| NoteError::Inspect {
-            path: path.clone(),
-            source,
-        })? {
-            let name = name
-                .into_string()
-                .map_err(|_| NoteError::InvalidFilename(path))?;
-            names.push(name);
-        }
-    }
-    names.sort();
-    Ok(names)
+    policy
+        .names(notes, EntryKind::MarkdownFile)
+        .map_err(inspect)
 }
 
 #[derive(Debug, Error)]
@@ -389,11 +417,43 @@ pub(crate) enum LookupError {
 
 /// Resolve a selector using only sorted, direct regular files under `notes/`.
 pub(crate) fn find(root: &KbRoot, selector: &str) -> Result<Option<PathBuf>, LookupError> {
+    find_with(root, selector, &mut Inventory::Strict)
+}
+
+pub(crate) fn find_for_write(
+    root: &KbRoot,
+    selector: &str,
+) -> Result<Option<PathBuf>, LookupError> {
+    let dir = root.path().join("notes");
+    if let Some(name) = selector.strip_prefix("notes/") {
+        return Ok(inventory(&dir, &mut Inventory::Strict)?
+            .into_iter()
+            .find(|candidate| candidate == name)
+            .map(|name| dir.join(name)));
+    }
+    if is_id(selector) {
+        let hits = inventory(&dir, &mut Inventory::Strict)?
+            .into_iter()
+            .filter(|name| {
+                name.strip_prefix(selector)
+                    .is_some_and(|tail| tail == ".md" || tail.starts_with('-'))
+            })
+            .collect();
+        return unique_hit(&dir, selector, hits);
+    }
+    find(root, selector)
+}
+
+pub(crate) fn find_with(
+    root: &KbRoot,
+    selector: &str,
+    policy: &mut Inventory<'_>,
+) -> Result<Option<PathBuf>, LookupError> {
     if !valid_selector(selector) {
         return Ok(None);
     }
     let notes = root.path().join("notes");
-    let names = inventory(&notes)?;
+    let names = inventory(&notes, policy)?;
     if is_id(selector)
         && let Some(name) = names.iter().find(|name| {
             name.strip_prefix(selector)
@@ -410,10 +470,13 @@ pub(crate) fn find(root: &KbRoot, selector: &str) -> Result<Option<PathBuf>, Loo
     };
     // Exact basenames follow the volume's case rules; IDs and substrings do not.
     let candidate = notes.join(basename.as_ref());
-    if regular_file(&candidate).map_err(|source| NoteError::Inspect {
-        path: candidate.clone(),
-        source,
-    })? {
+    if policy
+        .file(&candidate)
+        .map_err(|source| NoteError::Inspect {
+            path: candidate.clone(),
+            source,
+        })?
+    {
         return Ok(Some(candidate));
     }
 
@@ -661,10 +724,12 @@ mod tests {
         std::os::unix::fs::symlink(&target, &linked)?;
         for selector in ["kb-0001", "kb-0001-link.md", "link"] {
             assert!(
-                matches!(find(&root, selector), Err(LookupError::Inventory(NoteError::Inspect {path, ..})) if path == linked)
+                matches!(find(&root, selector), Err(LookupError::Inventory(NoteError::Inspect {source, ..})) if source.kind() == io::ErrorKind::InvalidInput && source.to_string().contains("refusing symbolic link or reparse point"))
             );
         }
-        assert!(matches!(snapshot(&root), Err(NoteError::Inspect {path, ..}) if path == linked));
+        assert!(
+            matches!(snapshot(&root), Err(NoteError::Inspect {source, ..}) if source.kind() == io::ErrorKind::InvalidInput && source.to_string().contains("refusing symbolic link or reparse point"))
+        );
         Ok(())
     }
 

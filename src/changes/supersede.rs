@@ -1,26 +1,71 @@
 use std::path::Path;
 
 use anyhow::{Context, Result, ensure};
-use jiff::civil::Date;
 
-use super::{Event, actual_id, append_entry, locate, read_log, read_note, rewrite};
+use super::mutation::links_with;
+use super::{Event, FileWrite, actual_id, locate, note_journal, read_note, rewrite, transaction};
+use crate::journal::Stamp;
 use crate::notes::{self, Note};
 use crate::store::{self, WriteLock};
 
-fn with_link(note: &Note, key: &str, id: &str) -> Result<String> {
-    let mut links = note.items(key);
-    ensure!(
-        links.iter().all(|s| notes::is_id(s)),
-        "non-ID item in {key}; refusing to rewrite"
-    );
-    if !links.contains(&id) {
-        links.push(id);
-    }
-    Ok(format!("[{}]", links.join(", ")))
+pub(super) fn mark_retired(
+    bytes: &[u8],
+    note: &Note,
+    successor: &str,
+    date: &str,
+) -> Result<Vec<u8>> {
+    let banner =
+        format!("> **Superseded by [[{successor}]] — kept for history, excluded from search.**");
+    rewrite::patch_with_banner(
+        bytes,
+        &[
+            ("status", "superseded"),
+            ("updated", date),
+            ("related", &links_with(note, "related", &[successor])?),
+        ],
+        &banner,
+    )
 }
 
-pub(crate) fn supersede(lock: &WriteLock, old: &str, new: &str, today: Date) -> Result<Event> {
-    with_second_write(lock, old, new, today, |path, bytes| {
+pub(super) fn mark_successor(bytes: &[u8], note: &Note, old: &str, date: &str) -> Result<Vec<u8>> {
+    rewrite::patch(
+        bytes,
+        &[
+            ("supersedes", &links_with(note, "supersedes", &[old])?),
+            ("updated", date),
+            ("related", &links_with(note, "related", &[old])?),
+        ],
+        None,
+    )
+}
+
+pub(super) fn require_live(note: &Note, id: &str) -> Result<()> {
+    let status = note
+        .scalar("status")
+        .with_context(|| format!("missing scalar status: in {id}"))?;
+    ensure!(status != "superseded", "{id} is already superseded");
+    Ok(())
+}
+
+pub(super) fn detail(successor: &str, reason: Option<&str>) -> Result<String> {
+    match reason {
+        None => Ok(format!("superseded by {successor}")),
+        Some(reason) => {
+            super::single_line("reason", reason)?;
+            ensure!(!reason.trim().is_empty(), "reason must not be blank");
+            Ok(format!("superseded by {successor} | reason={reason}"))
+        }
+    }
+}
+
+pub(crate) fn supersede(
+    lock: &WriteLock,
+    old: &str,
+    new: &str,
+    reason: Option<&str>,
+    stamp: &Stamp<'_>,
+) -> Result<Event> {
+    with_second_write(lock, old, new, reason, stamp, |path, bytes| {
         Ok(store::atomic_write(path, bytes)?)
     })
 }
@@ -31,7 +76,8 @@ pub(super) fn with_second_write(
     lock: &WriteLock,
     old: &str,
     new: &str,
-    today: Date,
+    reason: Option<&str>,
+    stamp: &Stamp<'_>,
     second_write: impl FnOnce(&Path, &[u8]) -> Result<()>,
 ) -> Result<Event> {
     let old = locate(lock.root(), old)?;
@@ -48,56 +94,50 @@ pub(super) fn with_second_write(
     let nid = actual_id(&new_meta)?;
     ensure!(oid != nid, "OLD and NEW have the same id {oid}");
     for (id, meta) in [(oid, &old_meta), (nid, &new_meta)] {
-        let status = meta
-            .scalar("status")
-            .with_context(|| format!("missing scalar status: in {id}"))?;
-        ensure!(status != "superseded", "{id} is already superseded");
+        require_live(meta, id)?;
     }
-    let date = today.to_string();
-    let banner = format!("> **Superseded by [[{nid}]] — kept for history, excluded from search.**");
-    let retired = rewrite::edit(
-        &raw_old,
+    let date = stamp.date().to_string();
+    let detail = detail(nid, reason)?;
+    let retired = mark_retired(&raw_old, &old_meta, nid, &date)
+        .with_context(|| format!("preparing {}", old.display()))?;
+    let successor = mark_successor(&raw_new, &new_meta, oid, &date)
+        .with_context(|| format!("preparing {}", new.display()))?;
+    let log = note_journal(
+        lock,
+        stamp,
+        "supersede",
+        oid,
+        &detail,
         &[
-            ("status", "superseded"),
-            ("updated", &date),
-            ("related", &with_link(&old_meta, "related", nid)?),
+            FileWrite {
+                path: &old,
+                before: Some(&raw_old),
+                after: &retired,
+            },
+            FileWrite {
+                path: &new,
+                before: Some(&raw_new),
+                after: &successor,
+            },
         ],
-        None,
-        Some(&banner),
-    )
-    .with_context(|| format!("preparing {}", old.display()))?;
-    let successor = rewrite::edit(
-        &raw_new,
-        &[
-            ("supersedes", &with_link(&new_meta, "supersedes", oid)?),
-            ("updated", &date),
-            ("related", &with_link(&new_meta, "related", oid)?),
-        ],
-        None,
-        None,
-    )
-    .with_context(|| format!("preparing {}", new.display()))?;
-    read_log(lock.root())?;
+    )?;
     store::atomic_write(&old, &retired)
-        .context("writing OLD failed — neither note was published")?;
+        .context("writing OLD failed — neither note was published")
+        .map_err(|error| transaction::abort(lock, error))?;
     if let Err(second_error) = second_write(&new, &successor) {
         if let Err(restore_error) = store::atomic_write(&old, &raw_old) {
             return Err(second_error).context(format!("NEW {} was not published; restoring OLD also failed ({restore_error:#}); {} is still modified", new.display(), old.display()));
         }
-        return Err(second_error).context(format!(
-            "NEW {} was not published; OLD {} restored byte-identical",
-            new.display(),
-            old.display()
+        return Err(transaction::abort(
+            lock,
+            second_error.context(format!(
+                "NEW {} was not published; OLD {} restored byte-identical",
+                new.display(),
+                old.display()
+            )),
         ));
     }
-    append_entry(
-        lock,
-        today,
-        "supersede",
-        oid,
-        &format!("superseded by {nid}"),
-    )
-    .with_context(|| {
+    transaction::finish(lock, &log).with_context(|| {
         format!(
             "both notes were published ({} and {}) but not journaled",
             old.display(),
