@@ -8,18 +8,18 @@ mod tests;
 use std::collections::BTreeSet;
 use std::env;
 use std::fs::{self, File};
-use std::io::{self, Read, Write};
+use std::io::{self, Read, Seek, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus};
 
-use tempfile::{NamedTempFile, TempPath};
+use tempfile::TempPath;
 use thiserror::Error;
 
 use crate::config::KbRoot;
 use crate::journal::{self, Actor};
 use crate::store::{WriteLock, directory, regular_file};
 pub(crate) use churn::churn;
-use process::{Output, command, run};
+use process::{Output, command, run, run_with_input};
 pub(crate) use status::status;
 
 const MANAGED: [&str; 9] = [
@@ -402,10 +402,19 @@ impl GitRepo<'_> {
         // The real index is immutable while we hold Git's own lock. Git itself stages/commits
         // through its usual atomic rewrites, with the reservation as its private index file.
         self.guard()?;
+        // Use Git's native spelling for the path. Git for Windows rejects the verbatim
+        // paths returned by Rust's canonicalize when appending its own lock suffix.
+        let git_admin = self.exec("rev-parse", &["--absolute-git-dir"])?.checked()?;
+        let git_index = native_path(strip_lf(&git_admin))?.join("index.lock");
+        if git_index.canonicalize()? != *reserved {
+            return Err(GitError::Invalid(
+                "Git's private index path does not match the reserved lock",
+            ));
+        }
         let private = |op: &'static str, args: &[&str]| {
             run(
                 git_cmd(self.root)
-                    .env("GIT_INDEX_FILE", &*reserved)
+                    .env("GIT_INDEX_FILE", &git_index)
                     .arg(op)
                     .args(args),
                 op,
@@ -418,7 +427,7 @@ impl GitRepo<'_> {
             private("read-tree", &["--empty"])?;
         }
         let status = self.managed_status()?;
-        let mut paths = NamedTempFile::new()?;
+        let mut paths = tempfile::tempfile()?;
         for record in status.split(|&b| b == 0).filter(|r| !r.is_empty()) {
             let path = record
                 .get(3..)
@@ -432,16 +441,13 @@ impl GitRepo<'_> {
         if status.is_empty() {
             return Ok(false);
         }
-        let paths = paths.into_temp_path();
-        let pathspec = |cmd: &mut Command| {
-            let mut arg = std::ffi::OsString::from("--pathspec-from-file=");
-            arg.push(&*paths);
-            cmd.arg(arg).arg("--pathspec-file-nul");
-        };
+        let pathspec = ["--pathspec-from-file=-", "--pathspec-file-nul"];
         let mut add = git_cmd(self.root);
-        add.env("GIT_INDEX_FILE", &*reserved).args(["add", "-A"]);
-        pathspec(&mut add);
-        run(&mut add, "add")?.checked()?;
+        add.env("GIT_INDEX_FILE", &git_index)
+            .args(["add", "-A"])
+            .args(pathspec);
+        paths.rewind()?;
+        run_with_input(&mut add, "add", paths.try_clone()?.into())?.checked()?;
         let names = private(
             "diff",
             &[
@@ -486,10 +492,11 @@ impl GitRepo<'_> {
         let message = intent.actor.commit_message(&subject, &reasons);
         let mut commit = git_cmd(self.root);
         commit
-            .env("GIT_INDEX_FILE", &*reserved)
-            .args(["commit", "--only", "-q", "-m", &message]);
-        pathspec(&mut commit);
-        run(&mut commit, "commit")?.checked()?;
+            .env("GIT_INDEX_FILE", &git_index)
+            .args(["commit", "--only", "-q", "-m", &message])
+            .args(pathspec);
+        paths.rewind()?;
+        run_with_input(&mut commit, "commit", paths.into())?.checked()?;
         if let Err(err) = reserved.persist(index) {
             let mut path = err.path;
             path.disable_cleanup(true);
