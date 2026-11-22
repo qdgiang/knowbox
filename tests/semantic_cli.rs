@@ -169,7 +169,11 @@ fn run_with_server(
     let status = loop {
         match listener.accept() {
             Ok((mut stream, _)) => {
-                if let Err(error) = exchange(&mut stream) {
+                // An accepted socket can inherit the listener's nonblocking mode.
+                if let Err(error) = stream
+                    .set_nonblocking(false)
+                    .and_then(|()| exchange(&mut stream))
+                {
                     child.kill()?;
                     child.wait()?;
                     return Err(error);

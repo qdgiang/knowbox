@@ -18,13 +18,14 @@ const FULL_FINGERPRINT: &str = "sha1:";
 
 pub(super) fn create_directory(path: &Path) -> io::Result<()> {
     if !store::directory(path)? {
-        let mut builder = fs::DirBuilder::new();
         #[cfg(unix)]
-        {
+        let result = {
             use std::os::unix::fs::DirBuilderExt;
-            builder.mode(0o700);
-        }
-        match builder.create(path) {
+            fs::DirBuilder::new().mode(0o700).create(path)
+        };
+        #[cfg(windows)]
+        let result = fs::create_dir(path);
+        match result {
             Ok(()) => {}
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
             Err(error) => return Err(error),
